@@ -6,7 +6,6 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { LicenseCheckService } from '../../../integrations/environment/license-check.service';
 import { UserSessionRepo } from '@docmost/db/repos/session/user-session.repo';
 import { CreateWorkspaceDto } from '../dto/create-workspace.dto';
 import { UpdateWorkspaceDto } from '../dto/update-workspace.dto';
@@ -18,7 +17,6 @@ import { WorkspaceRepo } from '@docmost/db/repos/workspace/workspace.repo';
 import { KyselyDB, KyselyTransaction } from '@docmost/db/types/kysely.types';
 import { executeTx } from '@docmost/db/utils';
 import { InjectKysely } from 'nestjs-kysely';
-import { Feature } from '../../../common/features';
 import { User } from '@docmost/db/types/entity.types';
 import { GroupUserRepo } from '@docmost/db/repos/group/group-user.repo';
 import { GroupRepo } from '@docmost/db/repos/group/group.repo';
@@ -64,7 +62,6 @@ export class WorkspaceService {
     private userRepo: UserRepo,
     private environmentService: EnvironmentService,
     private domainService: DomainService,
-    private licenseCheckService: LicenseCheckService,
     private shareRepo: ShareRepo,
     private readonly publicSpaceRepo: PublicSpaceRepo,
     private watcherRepo: WatcherRepo,
@@ -116,7 +113,14 @@ export class WorkspaceService {
 
     const { licenseKey, plan, ...rest } = workspace;
 
-    return rest;
+    return {
+      ...rest,
+      enforceSso:
+        rest.enforceSso && this.environmentService.isSsoCapabilityEnabled(),
+      authProviders: this.environmentService.isSsoCapabilityEnabled()
+        ? rest.authProviders
+        : [],
+    };
   }
 
   async create(
@@ -341,82 +345,20 @@ export class WorkspaceService {
       typeof updateWorkspaceDto.aiChatWorkspaceKnowledgeOnly !== 'undefined' ||
       typeof updateWorkspaceDto.enforceMcpOauth !== 'undefined'
     ) {
+      if (!this.environmentService.isSecurityControlsEnabled()) {
+        throw new ForbiddenException(
+          'Security controls are disabled on this instance',
+        );
+      }
+
       const ws = await this.db
         .selectFrom('workspaces')
-        .select(['id', 'licenseKey', 'plan', 'trashRetentionDays'])
+        .select(['id', 'trashRetentionDays'])
         .where('id', '=', workspaceId)
         .executeTakeFirst();
 
       if (!ws) {
         throw new NotFoundException('Workspace not found');
-      }
-
-      if (typeof updateWorkspaceDto.mcpEnabled !== 'undefined') {
-        if (!this.licenseCheckService.hasFeature(ws.licenseKey, 'mcp', ws.plan)) {
-          throw new ForbiddenException(
-            'This feature requires a valid license',
-          );
-        }
-      }
-
-      if (typeof updateWorkspaceDto.isScimEnabled !== 'undefined') {
-        if (!this.licenseCheckService.hasFeature(ws.licenseKey, Feature.SCIM, ws.plan)) {
-          throw new ForbiddenException(
-            'This feature requires a valid license',
-          );
-        }
-      }
-
-      if (typeof updateWorkspaceDto.allowPersonalSpaces !== 'undefined') {
-        if (
-          !this.licenseCheckService.hasFeature(
-            ws.licenseKey,
-            Feature.PERSONAL_SPACES,
-            ws.plan,
-          )
-        ) {
-          throw new ForbiddenException('This feature requires a valid license');
-        }
-      }
-
-      if (
-        typeof updateWorkspaceDto.aiChatReadOnly !== 'undefined' ||
-        typeof updateWorkspaceDto.aiChatWorkspaceKnowledgeOnly !== 'undefined'
-      ) {
-        if (
-          !this.licenseCheckService.hasFeature(
-            ws.licenseKey,
-            Feature.AI_CONTROLS,
-            ws.plan,
-          )
-        ) {
-          throw new ForbiddenException('This feature requires a valid license');
-        }
-      }
-
-      if (typeof updateWorkspaceDto.enforceMcpOauth !== 'undefined') {
-        if (
-          !this.licenseCheckService.hasFeature(
-            ws.licenseKey,
-            Feature.MCP_CONTROLS,
-            ws.plan,
-          )
-        ) {
-          throw new ForbiddenException('This feature requires a valid license');
-        }
-      }
-
-      if (
-        typeof updateWorkspaceDto.disablePublicSharing !== 'undefined' ||
-        typeof updateWorkspaceDto.trashRetentionDays !== 'undefined' ||
-        typeof updateWorkspaceDto.restrictApiToAdmins !== 'undefined' ||
-        typeof updateWorkspaceDto.allowMemberTemplates !== 'undefined'
-      ) {
-        if (!this.licenseCheckService.hasFeature(ws.licenseKey, Feature.SECURITY_SETTINGS, ws.plan)) {
-          throw new ForbiddenException(
-            'This feature requires a valid license',
-          );
-        }
       }
 
       if (
@@ -679,6 +621,37 @@ export class WorkspaceService {
         workspaceId,
         trx,
       );
+
+      const workspaceUpdated = await this.workspaceRepo.findById(workspaceId, {
+        trx,
+      });
+      const columnChanges = diffAuditTrackedFields(
+        [
+          'name',
+          'logo',
+          'enforceSso',
+          'enforceMfa',
+          'emailDomains',
+          'isScimEnabled',
+        ],
+        updateWorkspaceDto,
+        workspaceBefore,
+        workspaceUpdated,
+      );
+      if (columnChanges) {
+        Object.assign(before, columnChanges.before);
+        Object.assign(after, columnChanges.after);
+      }
+      if (Object.keys(after).length > 0)
+        await this.auditService.logInTransaction(
+          {
+            event: AuditEvent.WORKSPACE_UPDATED,
+            resourceType: AuditResource.WORKSPACE,
+            resourceId: workspaceId,
+            changes: { before, after },
+          },
+          trx,
+        );
     });
 
     if (after.aiSearch === true) {
@@ -703,33 +676,6 @@ export class WorkspaceService {
       withMemberCount: true,
       withLicenseKey: true,
     });
-
-    const columnChanges = diffAuditTrackedFields(
-      [
-        'name',
-        'logo',
-        'enforceSso',
-        'enforceMfa',
-        'emailDomains',
-        'isScimEnabled',
-      ],
-      updateWorkspaceDto,
-      workspaceBefore,
-      workspace,
-    );
-    if (columnChanges) {
-      Object.assign(before, columnChanges.before);
-      Object.assign(after, columnChanges.after);
-    }
-
-    if (Object.keys(after).length > 0) {
-      this.auditService.log({
-        event: AuditEvent.WORKSPACE_UPDATED,
-        resourceType: AuditResource.WORKSPACE,
-        resourceId: workspaceId,
-        changes: { before, after },
-      });
-    }
 
     const { licenseKey, ...rest } = workspace;
     return rest;
@@ -803,7 +749,7 @@ export class WorkspaceService {
 
     const { user } = result;
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.USER_ROLE_CHANGED,
       resourceType: AuditResource.USER,
       resourceId: user.id,
@@ -908,7 +854,7 @@ export class WorkspaceService {
       return user;
     });
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.USER_DEACTIVATED,
       resourceType: AuditResource.USER,
       resourceId: user.id,
@@ -949,7 +895,7 @@ export class WorkspaceService {
       workspaceId,
     );
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.USER_ACTIVATED,
       resourceType: AuditResource.USER,
       resourceId: user.id,
@@ -1032,7 +978,7 @@ export class WorkspaceService {
       return user;
     });
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.USER_DELETED,
       resourceType: AuditResource.USER,
       resourceId: user.id,

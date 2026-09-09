@@ -1,0 +1,264 @@
+{
+  "task": "LIKE-157 independent Docmost Security, SSO, and Enterprise-mode surfaces",
+  "passed": false,
+  "status": "runtime-unverified",
+  "refreshed_at": "2026-09-09T12:26:06Z",
+  "scope": {
+    "prd": ".omx/prd.json",
+    "requirements_matrix": ".omx/ralph/like-157-requirements.md",
+    "component_manifest": "docs/LIKE-157-SHIPPED-COMPONENTS.json",
+    "documentation_snapshot": "docs/LIKE-157-DOCS-SNAPSHOT.json",
+    "changed_files": ".omx/ralph/changed-files.txt",
+    "forbidden_paths_excluded": [
+      "apps/server/src/ee",
+      "apps/client/src/ee",
+      "packages/ee",
+      "packages/base-formula"
+    ],
+    "generated_paths_excluded": [
+      ".pnpm-store",
+      ".nx",
+      "node_modules",
+      "dist",
+      "build",
+      ".omx/runtime",
+      ".omx/cache",
+      "deleted paths"
+    ],
+    "refresh_basis": "Current existing allowed task-owned application, configuration, documentation, script, and test files only. Runtime, cache, generated, dependency-store, forbidden, and deleted paths are not cleaner inputs.",
+    "changed_file_count": 382
+  },
+  "completion_audit": {
+    "passed": false,
+    "status": "runtime-unverified",
+    "stop_condition": "Do not complete until every restored acceptance gate has direct evidence: exact locked TanStack 5.94.4 client lint without bypass, substitution, fabrication, or registry probe; live independent Authentik OIDC login; live Authentik SCIM provisioning; migration/runtime evidence on issue-isolated parameterized resources; reproducible image identity; exact pushed SHA and PR; and manager review.",
+    "blocked_by": [
+      "Exact locked @tanstack/eslint-plugin-query@5.94.4 client lint remains runtime-unverified; bypass, substitution, fabrication, and registry probes are prohibited.",
+      "Live independent Authentik-to-Docmost OIDC login and live Authentik SCIM provisioning have no evidence.",
+      "Migration/runtime evidence on issue-isolated parameterized resources and reproducible image identity have no evidence.",
+      "Exact pushed SHA, PR, and manager review are missing; commit, push, and PR creation remain unauthorized.",
+      "No reachable local daemon or local PostgreSQL/Redis binaries are available for issue-isolated migration/runtime evidence; images and resources remain unknown rather than absent."
+    ],
+    "readchk": "Understood as the same singleton Ralph lifecycle: full acceptance gates are restored, completion remains false, and the smallest permitted local runtime verification is first.",
+    "runtime_diagnostic": {
+      "attempt": "like-157-colima-default-20260909T231512Z",
+      "result_path": ".omx/ralph/runtime/like-157-colima-default-20260909T231512Z/attempt-result.json",
+      "status": "runtime-unverified",
+      "disposition": "tool-cell-terminated-before-wrapper-or-child-spawn-evidence",
+      "impact": "No child spawn or socket reachability evidence was obtained, so the live Authentik, migration/runtime, and reproducible-image gates remain runtime-unverified.",
+      "tool_attempt": "Observation 2026-09-09T23:18:11.640Z\u20132026-09-09T23:30:30.592Z (738.952s) ended tool-cell-terminated; wrapper/child were not observed, so the requested 300-second child deadline did not start."
+    }
+  },
+  "prompt_to_artifact_checklist": [
+    {
+      "requirement": "Self-hosted SSO mode independent of vendor licensing; provider CRUD, workspace authorization, encrypted/redacted secrets, allowSignup, enabled login, and owner recovery",
+      "status": "independently-implemented",
+      "artifacts": [
+        "apps/server/src/integrations/environment/environment.service.ts",
+        "apps/server/src/core/auth-provider/auth-provider.service.ts",
+        "apps/server/src/core/auth-provider/sso-capability.service.ts",
+        "apps/client/src/features/security",
+        "apps/server/src/core/auth-provider/auth-provider.service.spec.ts"
+      ]
+    },
+    {
+      "requirement": "OIDC email_verified gating; SAML and LDAP verified identity attributes; safe linking, domain policy, profile update, and provider-gated signup",
+      "status": "independently-implemented",
+      "artifacts": [
+        "apps/server/src/core/auth-provider/oidc.service.ts",
+        "apps/server/src/core/auth-provider/saml.service.ts",
+        "apps/server/src/core/auth-provider/ldap.service.ts",
+        "apps/server/src/core/auth-provider/federated-identity.ts",
+        "apps/server/src/core/auth-provider/federated-identity.spec.ts"
+      ]
+    },
+    {
+      "requirement": "SSO group aliases/forms, pre-created case-insensitive matching, LDAP mapping, membership preservation, SCIM filters/deactivation/Everyone protection/precedence, and MFA",
+      "status": "independently-implemented",
+      "artifacts": [
+        "apps/server/src/core/auth-provider/group-sync.util.ts",
+        "apps/server/src/provisioning/services/group-sync.service.ts",
+        "apps/server/src/provisioning/services/scim-resource.service.ts",
+        "apps/server/src/provisioning/services/mfa.service.ts",
+        "apps/server/src/provisioning/services/group-sync.service.spec.ts"
+      ]
+    },
+    {
+      "requirement": "Audit/SIEM lifecycle and security: durable events, redacted encrypted destinations, per-destination commit-visible ordered durable outbox delivery (at-least-once transport; audit-ID receiver dedupe), retry, idempotency, cursor progression, and terminal disablement",
+      "status": "independently-implemented",
+      "artifacts": [
+        "apps/server/src/integrations/audit/durable-audit.service.ts",
+        "apps/server/src/integrations/siem/siem-delivery.service.ts",
+        "apps/server/src/integrations/siem/siem-dispatcher.service.ts",
+        "apps/server/src/integrations/siem/siem-delivery.service.spec.ts"
+      ]
+    },
+    {
+      "requirement": "API keys and OAuth client/authorization lifecycle",
+      "status": "independently-implemented",
+      "artifacts": [
+        "apps/server/src/core/api-key/api-key.service.ts",
+        "apps/server/src/core/oauth/oauth.service.ts",
+        "apps/server/src/core/oauth/oauth.service.spec.ts",
+        "apps/client/src/features/api-key",
+        "apps/client/src/features/oauth"
+      ]
+    },
+    {
+      "requirement": "AI settings/chat/writing/MCP, authorized chat attachments, semantic and attachment search, upload processing, indexing, and cleanup lifecycle",
+      "status": "independently-implemented",
+      "artifacts": [
+        "apps/server/src/core/ai",
+        "apps/server/src/core/attachment",
+        "apps/server/src/core/search",
+        "apps/client/src/features/ai",
+        "apps/client/src/features/search"
+      ]
+    },
+    {
+      "requirement": "Templates, page verification/read confirmation, bases, import/export including explicit partial-file outcomes, personal spaces, and page/space/workspace/public-share/comment security controls",
+      "status": "runtime-unverified",
+      "artifacts": [
+        "apps/server/src/core/template",
+        "apps/server/src/core/page-verification",
+        "apps/server/src/core/base",
+        "apps/server/src/integrations/import",
+        "apps/server/src/integrations/export",
+        "apps/server/src/core/personal-space",
+        "apps/server/src/core/page/page-access",
+        "apps/server/src/core/space",
+        "apps/server/src/core/workspace",
+        "apps/client/src/features/page/components/page-import-modal.test.ts"
+      ]
+    },
+    {
+      "requirement": "Pinned official-docs evidence, component/license/build manifest, Docker context/dependency boundary, and changed-file cleaner input",
+      "status": "runtime-unverified",
+      "artifacts": [
+        "docs/LIKE-157-DOCS-SNAPSHOT.json",
+        "docs/LIKE-157-SHIPPED-COMPONENTS.json",
+        "scripts/validate-agpl-build-boundary.mjs",
+        ".dockerignore",
+        "Dockerfile",
+        ".omx/ralph/changed-files.txt"
+      ]
+    }
+  ],
+  "missing_surfaces": [],
+  "verification_evidence": [
+    {
+      "source": "docs/LIKE-157-DOCS-SNAPSHOT.json",
+      "status": "existing",
+      "result": "Official excerpts remain SHA-256-addressed content pins. Upstream commit resolution is unavailable; no upstream revision is claimed."
+    },
+    {
+      "source": "current allowed task-owned change inventory",
+      "status": "independently-implemented",
+      "result": "The current cleaner input contains 371 existing allowed paths, including apps/server/tsconfig.build.json, page-import.utils.ts, and like-157-dependency-recovery-phase1.json; it excludes forbidden roots, generated outputs, dependency stores, runtime/cache state, and deleted paths."
+    },
+    {
+      "source": "explicit server Jest regression",
+      "status": "independently-implemented",
+      "result": "Final post-cleaner rerun: 82 explicitly listed allowed server suites passed: 495 tests passed."
+    },
+    {
+      "source": "explicit client Vitest regression",
+      "status": "independently-implemented",
+      "result": "Final post-cleaner rerun: 18 explicitly listed allowed client test files passed: 33 tests passed."
+    },
+    {
+      "source": "explicit allowed builds",
+      "status": "independently-implemented",
+      "result": "Final post-cleaner rerun: server, client, and @docmost/editor-ext builds passed. Client build emitted only the existing advancedChunks deprecation and large-chunk guidance warnings."
+    },
+    {
+      "source": "explicit server ESLint",
+      "status": "independently-implemented",
+      "result": "Final post-cleaner rerun: 247 explicitly listed allowed server TypeScript files passed lint with no errors or warnings."
+    },
+    {
+      "source": "explicit client ESLint",
+      "status": "runtime-unverified",
+      "result": "Final post-cleaner rerun: client lint exits 2 before linting because the exact locked @tanstack/eslint-plugin-query@5.94.4 linked cache payload lacks published build/modern/index.js. No safe local cache, rebuild, or network recovery exists under the task constraints."
+    },
+    {
+      "source": "scripts/validate-agpl-build-boundary.mjs",
+      "status": "independently-implemented",
+      "result": "Architect CLEAR: self-test and current validation passed after the final cleaner. The validator requires server build and client src/ee exclusions, configured aliases, and static literal relative/absolute import, require, and import() specifiers resolving into excluded roots; it does not claim arbitrary computed-alias resolution."
+    },
+    {
+      "source": "oh-my-codex:ai-slop-cleaner standard mode",
+      "status": "independently-implemented",
+      "result": "Completed in standard mode on the current 371-file manifest before final verification. The only approved behavior-preserving cleanup removed the no-op SearchSpotlight open callback/prop and unused HomeAiPrompt ChatInput props."
+    },
+    {
+      "source": "restored acceptance gate: exact locked client lint",
+      "status": "runtime-unverified",
+      "result": "The exact locked TanStack 5.94.4 plugin payload is incomplete. No bypass, substitution, fabrication, or package/registry probe is permitted."
+    },
+    {
+      "source": "restored acceptance gate: live Authentik OIDC login",
+      "status": "runtime-unverified",
+      "result": "No live independent Authentik-to-Docmost OIDC login evidence exists."
+    },
+    {
+      "source": "restored acceptance gate: live Authentik SCIM provisioning",
+      "status": "runtime-unverified",
+      "result": "No live Authentik SCIM provisioning evidence exists."
+    },
+    {
+      "source": "restored acceptance gate: migration/runtime resources",
+      "status": "runtime-unverified",
+      "result": "No migration/runtime evidence exists on issue-isolated parameterized resources."
+    },
+    {
+      "source": "restored acceptance gate: reproducible image identity",
+      "status": "runtime-unverified",
+      "result": "No reproducible image identity evidence exists."
+    },
+    {
+      "source": "restored acceptance gate: exact pushed SHA and PR",
+      "status": "missing",
+      "result": "No exact pushed SHA or PR exists; commit, push, and PR creation remain unauthorized."
+    },
+    {
+      "source": "restored acceptance gate: manager review",
+      "status": "missing",
+      "result": "No manager review evidence exists."
+    },
+    {
+      "source": "isolated runtime preflight",
+      "status": "runtime-unverified",
+      "result": "Docker 29.3.0 build 5927d80c76 with Compose 5.1.0 and Colima 0.10.1 commit ed905... are installed at /opt/homebrew/bin. Their configured default/colima contexts and sockets are unreachable, and the default Colima profile is stopped. No local PostgreSQL/Redis binary is available. Candidate isolated ports and directories are recorded without binding resources. Images/resources are unknown, not absent. The next valid gate requires a reachable daemon and locally present digest-pinned PostgreSQL, Redis, and Authentik images."
+    }
+  ],
+  "authentik_interoperability": {
+    "status": "runtime-unverified",
+    "claim": "Official Authentik documentation supplies configuration-shape evidence for OIDC claims, SAML aliases, and SCIM patch membership operations only.",
+    "not_claimed": [
+      "No live Authentik-to-Docmost login test ran.",
+      "No live Authentik SCIM provisioning test ran.",
+      "No deployment, vendor account, or secret was accessed."
+    ]
+  },
+  "acceptance_gates": {
+    "exact_client_lint": "runtime-unverified",
+    "live_authentik_oidc_login": "runtime-unverified",
+    "live_authentik_scim_provisioning": "runtime-unverified",
+    "migration_runtime_on_isolated_parameterized_resources": "runtime-unverified",
+    "reproducible_image_identity": "runtime-unverified",
+    "exact_pushed_sha_and_pr": "missing",
+    "manager_review": "missing"
+  },
+  "prohibited": [
+    "production deployment or data access",
+    "EE inspection",
+    "Vault mutation",
+    "secret access or exposure",
+    "commit, push, or PR creation without authorization"
+  ],
+  "runtime_preflight": {
+    "status": "runtime-unverified",
+    "artifact": ".omx/ralph/like-157-runtime-preflight.json"
+  }
+}

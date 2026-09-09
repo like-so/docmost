@@ -17,9 +17,7 @@ import {
   Workspace,
 } from '@docmost/db/types/entity.types';
 import { PublicSpaceAppearanceDto } from './dto/public-space.dto';
-import { LicenseCheckService } from '../../integrations/environment/license-check.service';
 import { EnvironmentService } from '../../integrations/environment/environment.service';
-import { Feature, FeatureKey } from '../../common/features';
 
 @Injectable()
 export class PublicSpaceService {
@@ -30,15 +28,8 @@ export class PublicSpaceService {
     private readonly pagePermissionRepo: PagePermissionRepo,
     private readonly shareService: ShareService,
     private readonly transclusionService: TransclusionService,
-    private readonly licenseCheckService: LicenseCheckService,
     private readonly environmentService: EnvironmentService,
   ) {}
-
-  hasFeature(workspace: Workspace, feature: FeatureKey): boolean {
-    return this.licenseCheckService
-      .resolveFeatures(workspace.licenseKey, workspace.plan)
-      .includes(feature);
-  }
 
   isPublicSpacesAllowed(workspace: Workspace): boolean {
     const settings = workspace.settings as any;
@@ -78,7 +69,7 @@ export class PublicSpaceService {
     return {
       space: this.toPublicSpaceFields(space),
       searchIndexing: publicSpace.searchIndexing,
-      appearance: this.toPublicAppearance(publicSpace, workspace),
+      appearance: this.toPublicAppearance(publicSpace),
     };
   }
 
@@ -93,7 +84,7 @@ export class PublicSpaceService {
     return {
       space: this.toPublicSpaceFields(space),
       pageTree,
-      appearance: this.toPublicAppearance(publicSpace, workspace),
+      appearance: this.toPublicAppearance(publicSpace),
     };
   }
 
@@ -121,7 +112,7 @@ export class PublicSpaceService {
           page: null,
           space: this.toPublicSpaceFields(space),
           searchIndexing: publicSpace.searchIndexing,
-          appearance: this.toPublicAppearance(publicSpace, workspace),
+          appearance: this.toPublicAppearance(publicSpace),
           byline,
         };
       }
@@ -167,7 +158,7 @@ export class PublicSpaceService {
       page,
       space: this.toPublicSpaceFields(space),
       searchIndexing: publicSpace.searchIndexing,
-      appearance: this.toPublicAppearance(publicSpace, workspace),
+      appearance: this.toPublicAppearance(publicSpace),
       byline,
     };
   }
@@ -195,7 +186,7 @@ export class PublicSpaceService {
       page,
       space: this.toPublicSpaceFields(space),
       searchIndexing: publicSpace.searchIndexing,
-      appearance: this.toPublicAppearance(publicSpace, workspace),
+      appearance: this.toPublicAppearance(publicSpace),
       byline: this.getBylineSettings(publicSpace),
     };
   }
@@ -271,12 +262,6 @@ export class PublicSpaceService {
     if (enabled && !this.isPublicSpacesAllowed(workspace)) {
       throw new ForbiddenException(
         'Public spaces are not enabled for this workspace',
-      );
-    }
-
-    if (appearance && !this.hasFeature(workspace, Feature.PUBLIC_SPACE_APPEARANCE)) {
-      throw new ForbiddenException(
-        'Public docs appearance requires a paid license',
       );
     }
 
@@ -378,10 +363,7 @@ export class PublicSpaceService {
     };
   }
 
-  private toPublicAppearance(publicSpace: PublicSpace, workspace: Workspace) {
-    if (!this.hasFeature(workspace, Feature.PUBLIC_SPACE_APPEARANCE)) {
-      return undefined;
-    }
+  private toPublicAppearance(publicSpace: PublicSpace) {
     const appearance = (publicSpace?.settings as any)?.appearance;
     if (!appearance) return undefined;
     const result: { primaryColorLight?: string; primaryColorDark?: string } =

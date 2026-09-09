@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { Workspace } from '@docmost/db/types/entity.types';
 import { createHmac } from 'node:crypto';
+import { UserRole } from '../../common/helpers/types/permission';
 
 export function computeEmailSignature(
   email: string,
@@ -37,6 +38,14 @@ export function validateSsoEnforcement(workspace: Workspace) {
   if (workspace.enforceSso) {
     throw new BadRequestException('This workspace has enforced SSO login.');
   }
+}
+
+export function canUsePasswordLogin(
+  enforceSso: boolean,
+  role: string,
+  ssoEnabled = true,
+): boolean {
+  return !ssoEnabled || !enforceSso || role === UserRole.OWNER;
 }
 
 export function validateAllowedEmail(userEmail: string, workspace: Workspace) {

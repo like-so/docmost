@@ -147,7 +147,7 @@ export class AttachmentController {
         attachmentId: attachmentId,
       });
 
-      this.auditService.log({
+      await this.auditService.log({
         event: AuditEvent.ATTACHMENT_UPLOADED,
         resourceType: AuditResource.ATTACHMENT,
         resourceId: fileResponse?.id ?? attachmentId,
@@ -172,6 +172,67 @@ export class AttachmentController {
       this.logger.error(err);
       throw new BadRequestException('Error processing file upload.');
     }
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post('ai/chats/attachments/upload')
+  @UseInterceptors(FileInterceptor)
+  async uploadChatFile(
+    @Req() req: any,
+    @Res() res: FastifyReply,
+    @AuthUser() user: User,
+    @AuthWorkspace() workspace: Workspace,
+  ) {
+    this.requireAiChatUpload(workspace);
+    const maxFileSize = bytes(this.environmentService.getFileUploadSizeLimit());
+    let file = null;
+    try {
+      file = await req.file({
+        limits: { fileSize: maxFileSize, fields: 2, files: 1 },
+      });
+    } catch (error: any) {
+      if (error?.statusCode === 413) {
+        throw new BadRequestException(
+          `File too large. Exceeds the ${this.environmentService.getFileUploadSizeLimit()} limit`,
+        );
+      }
+      throw error;
+    }
+    if (!file) throw new BadRequestException('Failed to upload file');
+
+    const chatId = file.fields?.chatId?.value;
+    if (!chatId || !isValidUUID(chatId)) {
+      throw new BadRequestException('Valid chatId is required');
+    }
+
+    const attachment = await this.attachmentService.uploadChatFile(
+      file,
+      user.id,
+      workspace.id,
+      chatId,
+    );
+    await this.auditService.log({
+      event: AuditEvent.ATTACHMENT_UPLOADED,
+      resourceType: AuditResource.ATTACHMENT,
+      resourceId: attachment.id,
+      metadata: { chatId, fileName: attachment.fileName },
+    });
+    return res.send({
+      ...attachment,
+      url: this.buildFileUrl(workspace, attachment),
+    });
+  }
+
+  private requireAiChatUpload(workspace: Workspace) {
+    const ai = (workspace.settings as { ai?: Record<string, boolean> } | null)
+      ?.ai;
+    if (
+      ai?.chat !== true ||
+      ai.generative !== true ||
+      ai.chatReadOnly === true
+    )
+      throw new ForbiddenException('AI chat uploads are disabled');
   }
 
   @UseGuards(JwtAuthGuard)

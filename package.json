@@ -4,7 +4,7 @@
   "version": "0.96.0",
   "private": true,
   "scripts": {
-    "build": "nx run-many -t build",
+    "build": "pnpm agpl:build",
     "start": "pnpm --filter ./apps/server run start:prod",
     "collab": "pnpm --filter ./apps/server run collab:prod",
     "collab:dev": "pnpm --filter ./apps/server run collab:dev",
@@ -16,7 +16,9 @@
     "server:start": "nx run server:start:prod",
     "email:dev": "nx run server:email:dev",
     "dev": "pnpm concurrently -n \"frontend,backend\" -c \"cyan,green\" \"pnpm run client:dev\" \"pnpm run server:dev\"",
-    "clean": "rm -rf apps/*/dist packages/*/dist apps/client/node_modules/.vite"
+    "clean": "rm -rf apps/*/dist packages/*/dist apps/client/node_modules/.vite",
+    "agpl:validate": "node scripts/validate-agpl-build-boundary.mjs",
+    "agpl:build": "pnpm run agpl:validate && pnpm --filter server run build && pnpm --filter client run build && pnpm --filter @docmost/editor-ext run build"
   },
   "dependencies": {
     "@braintree/sanitize-url": "7.1.2",

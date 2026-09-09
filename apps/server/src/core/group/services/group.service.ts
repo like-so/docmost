@@ -73,27 +73,28 @@ export class GroupService {
       workspaceId: workspaceId,
     };
 
-    const createdGroup = await this.groupRepo.insertGroup(insertableGroup, trx);
-
-    if (createGroupDto?.userIds && createGroupDto.userIds.length > 0) {
-      await this.groupUserService.addUsersToGroupBatch(
-        createGroupDto.userIds,
-        createdGroup.id,
-        workspaceId,
-      );
-    }
-
-    this.auditService.log({
-      event: AuditEvent.GROUP_CREATED,
-      resourceType: AuditResource.GROUP,
-      resourceId: createdGroup.id,
-      changes: {
-        after: {
-          name: createdGroup.name,
-          description: createdGroup.description,
+    const createdGroup = await executeTx(this.db, async (ownedTrx) => {
+      const group = await this.groupRepo.insertGroup(insertableGroup, ownedTrx);
+      if (createGroupDto?.userIds?.length)
+        await this.groupUserService.addUsersToGroupBatch(
+          createGroupDto.userIds,
+          group.id,
+          workspaceId,
+          ownedTrx,
+        );
+      await this.auditService.logInTransaction(
+        {
+          event: AuditEvent.GROUP_CREATED,
+          resourceType: AuditResource.GROUP,
+          resourceId: group.id,
+          changes: {
+            after: { name: group.name, description: group.description },
+          },
         },
-      },
-    });
+        ownedTrx,
+      );
+      return group;
+    }, trx);
 
     return createdGroup;
   }
@@ -135,15 +136,6 @@ export class GroupService {
       group.description = updateGroupDto.description;
     }
 
-    await this.groupRepo.update(
-      {
-        name: updateGroupDto.name,
-        description: updateGroupDto.description,
-      },
-      group.id,
-      workspaceId,
-    );
-
     const changes = diffAuditTrackedFields(
       ['name', 'description'],
       updateGroupDto,
@@ -152,12 +144,26 @@ export class GroupService {
     );
 
     if (changes) {
-      this.auditService.log({
-        event: AuditEvent.GROUP_UPDATED,
-        resourceType: AuditResource.GROUP,
-        resourceId: group.id,
-        changes,
+      await executeTx(this.db, async (trx) => {
+        await this.groupRepo.update(
+          { name: updateGroupDto.name, description: updateGroupDto.description },
+          group.id,
+          workspaceId,
+          trx,
+        );
+        await this.auditService.logInTransaction({
+          event: AuditEvent.GROUP_UPDATED,
+          resourceType: AuditResource.GROUP,
+          resourceId: group.id,
+          changes,
+        }, trx);
       });
+    } else {
+      await this.groupRepo.update(
+        { name: updateGroupDto.name, description: updateGroupDto.description },
+        group.id,
+        workspaceId,
+      );
     }
 
     return group;
@@ -198,18 +204,17 @@ export class GroupService {
           { trx },
         );
       }
-    });
-
-    this.auditService.log({
-      event: AuditEvent.GROUP_DELETED,
-      resourceType: AuditResource.GROUP,
-      resourceId: groupId,
-      changes: {
-        before: {
-          name: group.name,
-          description: group.description,
+      await this.auditService.logInTransaction(
+        {
+          event: AuditEvent.GROUP_DELETED,
+          resourceType: AuditResource.GROUP,
+          resourceId: groupId,
+          changes: {
+            before: { name: group.name, description: group.description },
+          },
         },
-      },
+        trx,
+      );
     });
   }
 

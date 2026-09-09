@@ -9,6 +9,8 @@ import {
 export enum ExportFormat {
   HTML = 'html',
   Markdown = 'markdown',
+  Docx = 'docx',
+  Pdf = 'pdf',
 }
 
 export class ExportPageDto {
@@ -17,7 +19,7 @@ export class ExportPageDto {
   pageId: string;
 
   @IsString()
-  @IsIn(['html', 'markdown'])
+  @IsIn(['html', 'markdown', 'docx', 'pdf'])
   format: ExportFormat;
 
   @IsOptional()
@@ -35,7 +37,7 @@ export class ExportSpaceDto {
   spaceId: string;
 
   @IsString()
-  @IsIn(['html', 'markdown'])
+  @IsIn(['html', 'markdown', 'docx', 'pdf'])
   format: ExportFormat;
 
   @IsOptional()

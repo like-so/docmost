@@ -29,5 +29,6 @@
   "include": [
     "src"
   ],
+  "exclude": ["src/ee"],
   "references": [{ "path": "./tsconfig.node.json"}]
 }

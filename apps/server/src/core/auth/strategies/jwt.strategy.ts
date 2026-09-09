@@ -1,4 +1,4 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { Strategy } from 'passport-jwt';
 import { EnvironmentService } from '../../../integrations/environment/environment.service';
@@ -13,20 +13,23 @@ import { UserRepo } from '@docmost/db/repos/user/user.repo';
 import { UserSessionRepo } from '@docmost/db/repos/session/user-session.repo';
 import { SessionActivityService } from '../../session/session-activity.service';
 import { FastifyRequest } from 'fastify';
-import { extractBearerTokenFromHeader, isUserDisabled } from '../../../common/helpers';
-import { ModuleRef } from '@nestjs/core';
+import {
+  extractBearerTokenFromHeader,
+  isUserDisabled,
+} from '../../../common/helpers';
+import { ApiKeyService } from '../../api-key/api-key.service';
+import { OAuthService } from '../../oauth/oauth.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
-  private logger = new Logger('JwtStrategy');
-
   constructor(
     private userRepo: UserRepo,
     private workspaceRepo: WorkspaceRepo,
     private userSessionRepo: UserSessionRepo,
     private sessionActivityService: SessionActivityService,
     private readonly environmentService: EnvironmentService,
-    private moduleRef: ModuleRef,
+    private readonly apiKeyService: ApiKeyService,
+    private readonly oauthService: OAuthService,
   ) {
     super({
       jwtFromRequest: (req: FastifyRequest) => {
@@ -85,71 +88,39 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     if ((payload as JwtPayload).sessionId) {
       const sessionId = (payload as JwtPayload).sessionId;
       const session = await this.userSessionRepo.findActiveById(sessionId);
-      if (!session || session.userId !== payload.sub || session.workspaceId !== payload.workspaceId) {
+      if (
+        !session ||
+        session.userId !== payload.sub ||
+        session.workspaceId !== payload.workspaceId
+      ) {
         throw new UnauthorizedException();
       }
       req.raw.sessionId = sessionId;
-      this.sessionActivityService.trackActivity(sessionId, payload.sub, payload.workspaceId);
+      this.sessionActivityService.trackActivity(
+        sessionId,
+        payload.sub,
+        payload.workspaceId,
+      );
     }
 
     return { user, workspace, authType: JwtType.ACCESS };
   }
 
   private async validateApiKey(req: any, payload: JwtApiKeyPayload) {
-    let ApiKeyModule: any;
-    let isApiKeyModuleReady = false;
-
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      ApiKeyModule = require('./../../../ee/api-key/api-key.service');
-      isApiKeyModuleReady = true;
-    } catch (err) {
-      this.logger.debug(
-        'API Key module requested but enterprise module not bundled in this build',
-      );
-      isApiKeyModuleReady = false;
-    }
-
-    if (isApiKeyModuleReady) {
-      const ApiKeyService = this.moduleRef.get(ApiKeyModule.ApiKeyService, {
-        strict: false,
-      });
-
-      return ApiKeyService.validateApiKey(payload);
-    }
-
-    throw new UnauthorizedException('Enterprise API Key module missing');
+    const bearer = extractBearerTokenFromHeader(req);
+    if (!bearer) throw new UnauthorizedException();
+    const { key, scopes } = await this.apiKeyService.validateApiKey(
+      payload,
+      bearer,
+    );
+    const user = await this.userRepo.findById(payload.sub, payload.workspaceId);
+    const workspace = await this.workspaceRepo.findById(payload.workspaceId);
+    if (!user || !workspace || isUserDisabled(user))
+      throw new UnauthorizedException();
+    return { user, workspace, apiKey: { id: key.id, scopes } };
   }
 
   private async validateOAuthToken(req: any, payload: JwtOAuthPayload) {
-    let OAuthStrategyModule: any;
-    let isOAuthModuleReady = false;
-
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      OAuthStrategyModule = require('./../../../ee/oauth/services/oauth-strategy.service');
-      isOAuthModuleReady = true;
-    } catch (err) {
-      this.logger.debug(
-        'OAuth module requested but enterprise module not bundled in this build',
-      );
-      isOAuthModuleReady = false;
-    }
-
-    if (isOAuthModuleReady) {
-      const OAuthStrategyService = this.moduleRef.get(
-        OAuthStrategyModule.OAuthStrategyService,
-        {
-          strict: false,
-        },
-      );
-
-      return OAuthStrategyService.validateOAuthToken(payload, {
-        workspaceId: req.raw.workspaceId,
-        host: req.raw.headers?.host ?? req.headers?.host,
-      });
-    }
-
-    throw new UnauthorizedException('Enterprise OAuth module missing');
+    return this.oauthService.validateOAuthToken(payload, req.raw.workspaceId);
   }
 }

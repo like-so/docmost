@@ -13,7 +13,6 @@ import { Space, User } from '@docmost/db/types/entity.types';
 import { UpdateSpaceDto } from '../dto/update-space.dto';
 import { executeTx } from '@docmost/db/utils';
 import { InjectKysely } from 'nestjs-kysely';
-import { Feature } from '../../../common/features';
 import { SpaceMemberService } from './space-member.service';
 import { SpaceRole } from '../../../common/helpers/types/permission';
 import { QueueJob, QueueName } from 'src/integrations/queue/constants';
@@ -21,8 +20,7 @@ import { Queue } from 'bullmq';
 import { InjectQueue } from '@nestjs/bullmq';
 import { CursorPaginationResult } from '@docmost/db/pagination/cursor-pagination';
 import { ShareRepo } from '@docmost/db/repos/share/share.repo';
-import { WorkspaceRepo } from '@docmost/db/repos/workspace/workspace.repo';
-import { LicenseCheckService } from '../../../integrations/environment/license-check.service';
+import { EnvironmentService } from '../../../integrations/environment/environment.service';
 import { AuditEvent, AuditResource } from '../../../common/events/audit-events';
 import { diffAuditTrackedFields } from '../../../common/helpers';
 import {
@@ -36,8 +34,7 @@ export class SpaceService {
     private spaceRepo: SpaceRepo,
     private spaceMemberService: SpaceMemberService,
     private shareRepo: ShareRepo,
-    private workspaceRepo: WorkspaceRepo,
-    private licenseCheckService: LicenseCheckService,
+    private environmentService: EnvironmentService,
     @InjectKysely() private readonly db: KyselyDB,
     @InjectQueue(QueueName.ATTACHMENT_QUEUE) private attachmentQueue: Queue,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
@@ -70,23 +67,25 @@ export class SpaceService {
           workspaceId,
           trx,
         );
+        await this.auditService.logInTransaction(
+          {
+            event: AuditEvent.SPACE_CREATED,
+            resourceType: AuditResource.SPACE,
+            resourceId: space.id,
+            spaceId: space.id,
+            changes: {
+              after: {
+                name: space.name,
+                slug: space.slug,
+                ...(space.isPersonal ? { isPersonal: true } : {}),
+              },
+            },
+          },
+          trx,
+        );
       },
       trx,
     );
-
-    this.auditService.log({
-      event: AuditEvent.SPACE_CREATED,
-      resourceType: AuditResource.SPACE,
-      resourceId: space.id,
-      spaceId: space.id,
-      changes: {
-        after: {
-          name: space.name,
-          slug: space.slug,
-          ...(space.isPersonal ? { isPersonal: true } : {}),
-        },
-      },
-    });
 
     return { ...space, memberCount: 1 };
   }
@@ -143,30 +142,10 @@ export class SpaceService {
       typeof updateSpaceDto.disablePublicSharing !== 'undefined' ||
       typeof updateSpaceDto.allowViewerComments !== 'undefined'
     ) {
-      const workspace = await this.workspaceRepo.findById(workspaceId, {
-        withLicenseKey: true,
-      });
-
-      if (
-        typeof updateSpaceDto.disablePublicSharing !== 'undefined' &&
-        !this.licenseCheckService.hasFeature(
-          workspace.licenseKey,
-          Feature.SECURITY_SETTINGS,
-          workspace.plan,
-        )
-      ) {
-        throw new ForbiddenException('This feature requires a valid license');
-      }
-
-      if (
-        typeof updateSpaceDto.allowViewerComments !== 'undefined' &&
-        !this.licenseCheckService.hasFeature(
-          workspace.licenseKey,
-          Feature.VIEWER_COMMENTS,
-          workspace.plan,
-        )
-      ) {
-        throw new ForbiddenException('This feature requires a valid license');
+      if (!this.environmentService.isSecurityControlsEnabled()) {
+        throw new ForbiddenException(
+          'Security controls are disabled on this instance',
+        );
       }
     }
 
@@ -228,28 +207,30 @@ export class SpaceService {
         workspaceId,
         trx,
       );
+
+      const columnChanges = diffAuditTrackedFields(
+        ['name', 'slug', 'description'],
+        updateSpaceDto,
+        spaceBefore,
+        updatedSpace,
+      );
+      if (columnChanges) {
+        Object.assign(before, columnChanges.before);
+        Object.assign(after, columnChanges.after);
+      }
+      if (Object.keys(after).length > 0) {
+        await this.auditService.logInTransaction(
+          {
+            event: AuditEvent.SPACE_UPDATED,
+            resourceType: AuditResource.SPACE,
+            resourceId: updateSpaceDto.spaceId,
+            spaceId: updateSpaceDto.spaceId,
+            changes: { before, after },
+          },
+          trx,
+        );
+      }
     });
-
-    const columnChanges = diffAuditTrackedFields(
-      ['name', 'slug', 'description'],
-      updateSpaceDto,
-      spaceBefore,
-      updatedSpace,
-    );
-    if (columnChanges) {
-      Object.assign(before, columnChanges.before);
-      Object.assign(after, columnChanges.after);
-    }
-
-    if (Object.keys(after).length > 0) {
-      this.auditService.log({
-        event: AuditEvent.SPACE_UPDATED,
-        resourceType: AuditResource.SPACE,
-        resourceId: updateSpaceDto.spaceId,
-        spaceId: updateSpaceDto.spaceId,
-        changes: { before, after },
-      });
-    }
 
     return updatedSpace;
   }
@@ -278,21 +259,26 @@ export class SpaceService {
       throw new NotFoundException('Space not found');
     }
 
-    await this.spaceRepo.deleteSpace(spaceId, workspaceId);
-    await this.attachmentQueue.add(QueueJob.DELETE_SPACE_ATTACHMENTS, space);
-
-    this.auditService.log({
-      event: AuditEvent.SPACE_DELETED,
-      resourceType: AuditResource.SPACE,
-      resourceId: spaceId,
-      spaceId: spaceId,
-      changes: {
-        before: {
-          name: space.name,
-          slug: space.slug,
-          description: space.description,
+    await executeTx(this.db, async (trx) => {
+      await this.spaceRepo.deleteSpace(spaceId, workspaceId, trx);
+      await this.auditService.logInTransaction(
+        {
+          event: AuditEvent.SPACE_DELETED,
+          resourceType: AuditResource.SPACE,
+          resourceId: spaceId,
+          spaceId: spaceId,
+          changes: {
+            before: {
+              name: space.name,
+              slug: space.slug,
+              description: space.description,
+            },
+          },
         },
-      },
+        trx,
+      );
     });
+    this.spaceRepo.emitDeleted(spaceId, workspaceId);
+    await this.attachmentQueue.add(QueueJob.DELETE_SPACE_ATTACHMENTS, space);
   }
 }

@@ -75,26 +75,26 @@ export class SignupService {
           workspaceId,
           trx,
         );
+        await this.auditService.logInTransaction(
+          {
+            event: AuditEvent.USER_CREATED,
+            resourceType: AuditResource.USER,
+            resourceId: user.id,
+            changes: {
+              after: {
+                name: user.name,
+                email: user.email,
+                role: user.role,
+              },
+            },
+            metadata: { source: 'signup' },
+          },
+          trx,
+        );
         return user;
       },
       trx,
     );
-
-    this.auditService.log({
-      event: AuditEvent.USER_CREATED,
-      resourceType: AuditResource.USER,
-      resourceId: user.id,
-      changes: {
-        after: {
-          name: user.name,
-          email: user.email,
-          role: user.role,
-        },
-      },
-      metadata: {
-        source: 'signup',
-      },
-    });
 
     return user;
   }

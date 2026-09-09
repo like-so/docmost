@@ -1,4 +1,4 @@
-import { ActionIcon, Menu, Tooltip } from "@mantine/core";
+import { ActionIcon, Menu } from "@mantine/core";
 import {
   IconDots,
   IconEdit,
@@ -8,9 +8,6 @@ import {
 } from "@tabler/icons-react";
 import { modals } from "@mantine/modals";
 import { useTranslation } from "react-i18next";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
-import { useUpgradeLabel } from "@/ee/hooks/use-upgrade-label";
 
 type CommentMenuProps = {
   onEditComment: () => void;
@@ -30,8 +27,6 @@ function CommentMenu({
   isParentComment = false,
 }: CommentMenuProps) {
   const { t } = useTranslation();
-  const canResolve = useHasFeature(Feature.COMMENT_RESOLUTION);
-  const upgradeLabel = useUpgradeLabel();
 
   //@ts-ignore
   const openDeleteModal = () =>
@@ -65,7 +60,7 @@ function CommentMenu({
           </Menu.Item>
         )}
         {isParentComment &&
-          (canResolve ? (
+          (
             <Menu.Item
               onClick={onResolveComment}
               leftSection={
@@ -78,13 +73,7 @@ function CommentMenu({
             >
               {isResolved ? t("Re-open comment") : t("Resolve comment")}
             </Menu.Item>
-          ) : (
-            <Tooltip label={upgradeLabel} position="left" withinPortal={false}>
-              <Menu.Item disabled leftSection={<IconCircleCheck size={14} />}>
-                {t("Resolve comment")}
-              </Menu.Item>
-            </Tooltip>
-          ))}
+          )}
         <Menu.Item
           leftSection={<IconTrash size={14} />}
           onClick={openDeleteModal}

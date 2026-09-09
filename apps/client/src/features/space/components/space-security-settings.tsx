@@ -1,9 +1,8 @@
-import { Text, Divider, Title } from "@mantine/core";
-import React from "react";
+import { Text, Divider, Group, Switch, Title } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import { useTranslation } from "react-i18next";
 import { ISpace } from "@/features/space/types/space.types.ts";
-import SpacePublicSharingToggle from "@/ee/security/components/space-public-sharing-toggle.tsx";
-import SpaceViewerCommentsToggle from "@/ee/security/components/space-viewer-comments-toggle.tsx";
+import { updateSpace } from "@/features/space/services/space-service.ts";
 
 type SpaceSecuritySettingsProps = {
   space: ISpace;
@@ -24,11 +23,54 @@ export default function SpaceSecuritySettings({
         {t("Security")}
       </Title>
 
-      <SpacePublicSharingToggle space={space} />
+      <SecurityToggle
+        space={space}
+        field="disablePublicSharing"
+        label={t("Allow public sharing")}
+        checked={space.settings?.sharing?.disabled !== true}
+      />
 
       <Divider my="lg" />
 
-      <SpaceViewerCommentsToggle space={space} />
+      <SecurityToggle
+        space={space}
+        field="allowViewerComments"
+        label={t("Allow viewer comments")}
+        checked={space.settings?.comments?.allowViewerComments === true}
+      />
     </div>
+  );
+}
+
+function SecurityToggle({
+  space,
+  field,
+  label,
+  checked,
+}: {
+  space: ISpace;
+  field: "disablePublicSharing" | "allowViewerComments";
+  label: string;
+  checked: boolean;
+}) {
+  async function change(value: boolean) {
+    try {
+      await updateSpace({
+        id: space.id,
+        [field]: field === "disablePublicSharing" ? !value : value,
+      });
+    } catch (error) {
+      notifications.show({
+        color: "red",
+        message: error?.response?.data?.message ?? "Unable to update setting",
+      });
+    }
+  }
+
+  return (
+    <Group justify="space-between">
+      <Text>{label}</Text>
+      <Switch checked={checked} onChange={(event) => change(event.currentTarget.checked)} />
+    </Group>
   );
 }

@@ -99,7 +99,8 @@ import { GeneralQueueProcessor } from './processors/general-queue.processor';
       defaultJobOptions: {
         removeOnComplete: true,
         removeOnFail: true,
-        attempts: 1,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 20 * 1000 },
       },
     }),
     BullModule.registerQueue({

@@ -21,9 +21,6 @@ import { useDisclosure } from "@mantine/hooks";
 import { WorkspaceInviteForm } from "@/features/workspace/components/members/components/workspace-invite-form";
 import { CustomAvatar } from "@/components/ui/custom-avatar";
 import { AvatarIconType } from "@/features/attachments/types/attachment.types";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
-import { useUpgradeLabel } from "@/ee/hooks/use-upgrade-label";
 
 export default function GlobalSidebar() {
   const { t } = useTranslation();
@@ -31,8 +28,6 @@ export default function GlobalSidebar() {
   const [active, setActive] = useState(location.pathname);
   const [mobileSidebarOpened] = useAtom(mobileSidebarAtom);
   const toggleMobileSidebar = useToggleSidebar(mobileSidebarAtom);
-  const hasTemplates = useHasFeature(Feature.TEMPLATES);
-  const upgradeLabel = useUpgradeLabel();
   const mainNavItems = [
     { label: "Home", icon: IconHome, path: "/home" },
     { label: "Favorites", icon: IconStar, path: "/favorites" },
@@ -41,7 +36,6 @@ export default function GlobalSidebar() {
       label: "Templates",
       icon: IconTemplate,
       path: "/templates",
-      disabled: !hasTemplates,
     },
   ];
   const { data: favoriteSpacesData, isPending: isFavoritesPending } = useFavoritesQuery("space");
@@ -70,10 +64,10 @@ export default function GlobalSidebar() {
       <ScrollArea w="100%" style={{ flex: 1 }}>
         <div className={classes.section}>
           {mainNavItems.map((item) =>
-            item.disabled ? (
+            false ? (
               <Tooltip
                 key={item.label}
-                label={upgradeLabel}
+                label="Unavailable"
                 position="right"
                 withArrow
               >

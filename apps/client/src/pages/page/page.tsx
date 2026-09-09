@@ -13,9 +13,7 @@ import { IconAlertTriangle, IconFileOff } from "@tabler/icons-react";
 import { Button } from "@mantine/core";
 import { Link } from "react-router-dom";
 import { ErrorBoundary } from "react-error-boundary";
-import { BaseView } from "@/ee/base/components/base-view";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
+import { BaseView } from "@/features/base/components/base-view";
 import { getPageTitle } from "@/features/page/page.utils";
 import { DocumentTitle } from "@/components/ui/document-title.tsx";
 const MemoizedFullEditor = React.memo(FullEditor);
@@ -58,7 +56,6 @@ function PageContent({ pageSlug }: { pageSlug: string | undefined }) {
   } = usePageQuery({ pageId: extractPageSlugId(pageSlug) });
   const { data: space } = useGetSpaceBySlugQuery(page?.space?.slug);
 
-  const hasBases = useHasFeature(Feature.BASES);
   const canEdit = !page?.deletedAt && (page?.permissions?.canEdit ?? false);
   const canComment =
     canEdit ||
@@ -134,7 +131,7 @@ function PageContent({ pageSlug }: { pageSlug: string | undefined }) {
           >
             <BaseView
               pageId={page.id}
-              editable={hasBases && canEdit}
+              editable={canEdit}
               titleSlot={
                 <div
                   className="base-page-title"
@@ -145,7 +142,7 @@ function PageContent({ pageSlug }: { pageSlug: string | undefined }) {
                     slugId={page.slugId}
                     title={page.title}
                     spaceSlug={page.space?.slug ?? ""}
-                    editable={hasBases && canEdit}
+                    editable={canEdit}
                     isBase
                   />
                 </div>

@@ -1,5 +1,4 @@
-import React from "react";
-import { MfaSettings } from "@/ee/mfa";
+import { MfaSettings } from "@/features/security/components/mfa-settings.tsx";
 
 export function AccountMfaSection() {
   return <MfaSettings />;

@@ -20,7 +20,7 @@ import {
   isUserDisabled,
   nanoIdGen,
 } from '../../../common/helpers';
-import { throwIfEmailNotVerified } from '../auth.util';
+import { canUsePasswordLogin, throwIfEmailNotVerified } from '../auth.util';
 import { ChangePasswordDto } from '../dto/change-password.dto';
 import { MailService } from '../../../integrations/mail/mail.service';
 import ChangePasswordEmail from '@docmost/transactional/emails/change-password-email';
@@ -43,6 +43,19 @@ import {
 import { EnvironmentService } from '../../../integrations/environment/environment.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { EventName } from '../../../common/events/event.contants';
+import { MfaGateService } from '../../../provisioning/services/mfa-gate.service';
+import { MfaService } from '../../../provisioning/services/mfa.service';
+import { GroupSyncService } from '../../../provisioning/services/group-sync.service';
+import { randomBytes } from 'node:crypto';
+import {
+  FederatedIdentity,
+  isAllowedEmail,
+} from '../../auth-provider/federated-identity';
+
+export type LoginResult =
+  | { authToken: string }
+  | { mfaRequired: true; challengeId: string }
+  | { mfaSetupRequired: true; setupId: string };
 
 @Injectable()
 export class AuthService {
@@ -59,6 +72,9 @@ export class AuthService {
     private domainService: DomainService,
     private environmentService: EnvironmentService,
     private eventEmitter: EventEmitter2,
+    private readonly mfaGate: MfaGateService,
+    private readonly mfa: MfaService,
+    private readonly groups: GroupSyncService,
     @InjectKysely() private readonly db: KyselyDB,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
   ) {}
@@ -71,6 +87,23 @@ export class AuthService {
     const errorMessage = 'Email or password does not match';
     if (!user || isUserDisabled(user)) {
       throw new UnauthorizedException(errorMessage);
+    }
+
+    if (workspaceId) {
+      const workspace = await this.db
+        .selectFrom('workspaces')
+        .select('enforceSso')
+        .where('id', '=', workspaceId)
+        .executeTakeFirst();
+      if (
+        !canUsePasswordLogin(
+          Boolean(workspace?.enforceSso),
+          user.role,
+          this.environmentService.isSsoCapabilityEnabled(),
+        )
+      ) {
+        throw new BadRequestException('This workspace has enforced SSO login.');
+      }
     }
 
     const isPasswordMatch = await comparePasswordHash(
@@ -93,18 +126,202 @@ export class AuthService {
     user.lastLoginAt = new Date();
     await this.userRepo.updateLastLogin(user.id, workspaceId);
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.USER_LOGIN,
       resourceType: AuditResource.USER,
       resourceId: user.id,
       metadata: { source: 'password' },
     });
 
-    return this.sessionService.createSessionAndToken(user);
+    return this.completeLogin(user, workspaceId);
   }
 
   async register(createUserDto: CreateUserDto, workspaceId: string) {
     const user = await this.signupService.signup(createUserDto, workspaceId);
+    return this.sessionService.createSessionAndToken(user);
+  }
+
+  async loginFederated(
+    providerId: string,
+    identity: FederatedIdentity,
+    workspaceId: string,
+  ): Promise<LoginResult> {
+    const provider = await this.findEligibleFederatedProvider(
+      providerId,
+      identity,
+      workspaceId,
+    );
+    const account = await this.db
+      .selectFrom('authAccounts')
+      .innerJoin('users', 'users.id', 'authAccounts.userId')
+      .selectAll('users')
+      .where('authAccounts.authProviderId', '=', providerId)
+      .where('authAccounts.providerUserId', '=', identity.subject)
+      .where('authAccounts.workspaceId', '=', workspaceId)
+      .where('users.workspaceId', '=', workspaceId)
+      .where('users.deactivatedAt', 'is', null)
+      .where('users.deletedAt', 'is', null)
+      .executeTakeFirst();
+    const user =
+      account ??
+      (await this.resolveFederatedUser(
+        providerId,
+        identity,
+        workspaceId,
+        provider,
+      ));
+    if (identity.name && identity.emailVerified) {
+      await this.userRepo.updateUser(
+        { name: identity.name },
+        user.id,
+        workspaceId,
+      );
+      user.name = identity.name;
+    }
+    if (identity.groups !== undefined) {
+      await this.groups.syncUserGroups(
+        workspaceId,
+        user.id,
+        providerId,
+        identity.groups,
+      );
+    }
+    return this.completeLogin(user, workspaceId);
+  }
+
+  private async resolveFederatedUser(
+    providerId: string,
+    identity: FederatedIdentity,
+    workspaceId: string,
+    provider: { allowSignup: boolean; settings: unknown },
+  ): Promise<User> {
+    return executeTx(this.db, async (trx) => {
+      const existing = await this.userRepo.findByEmail(
+        identity.email,
+        workspaceId,
+        { trx },
+      );
+      if (existing && existing.workspaceId !== workspaceId) {
+        throw new UnauthorizedException(
+          'SSO account is not eligible for automatic linking.',
+        );
+      }
+      if (!existing && !provider.allowSignup) {
+        throw new UnauthorizedException('SSO signup is disabled.');
+      }
+      const user =
+        existing ??
+        (await this.signupService.signup(
+          {
+            email: identity.email,
+            name: identity.name ?? identity.email.split('@')[0],
+            password: randomBytes(32).toString('base64url'),
+            emailVerifiedAt: new Date(),
+          } as CreateUserDto,
+          workspaceId,
+          trx,
+        ));
+      const inserted = await trx
+        .insertInto('authAccounts')
+        .values({
+          authProviderId: providerId,
+          providerUserId: identity.subject,
+          userId: user.id,
+          workspaceId,
+        })
+        .onConflict((conflict) =>
+          conflict.columns(['authProviderId', 'providerUserId']).doNothing(),
+        )
+        .returning('userId')
+        .executeTakeFirst();
+      if (!inserted) {
+        throw new UnauthorizedException('SSO identity is already linked.');
+      }
+      return user;
+    });
+  }
+
+  private async findEligibleFederatedProvider(
+    providerId: string,
+    identity: FederatedIdentity,
+    workspaceId: string,
+  ) {
+    const provider = await this.db
+      .selectFrom('authProviders')
+      .select(['allowSignup', 'settings'])
+      .where('id', '=', providerId)
+      .where('workspaceId', '=', workspaceId)
+      .where('isEnabled', '=', true)
+      .where('deletedAt', 'is', null)
+      .executeTakeFirst();
+    if (
+      !provider ||
+      !identity.email ||
+      !identity.emailVerified ||
+      !isAllowedEmail(identity.email, provider.settings)
+    ) {
+      throw new UnauthorizedException(
+        'SSO account is not eligible for automatic linking.',
+      );
+    }
+    return provider;
+  }
+
+  async completeMfaLogin(challengeId: string, code: string): Promise<string> {
+    const challenge = await this.mfa.verifyChallenge(challengeId, code);
+    const user = await this.userRepo.findById(
+      challenge.userId,
+      challenge.workspaceId,
+    );
+    if (!user || isUserDisabled(user)) {
+      throw new UnauthorizedException('MFA login user is unavailable');
+    }
+    return this.sessionService.createSessionAndToken(user);
+  }
+
+  async startMfaSetup(setupId: string) {
+    const challenge = await this.mfa.getSetupChallenge(setupId);
+    const user = await this.userRepo.findById(
+      challenge.userId,
+      challenge.workspaceId,
+    );
+    if (!user || isUserDisabled(user)) {
+      throw new UnauthorizedException('MFA setup user is unavailable');
+    }
+    return this.mfa.setup(
+      user.id,
+      challenge.workspaceId,
+      user.email,
+      undefined,
+      true,
+    );
+  }
+
+  async verifyMfaPassword(
+    userId: string,
+    workspaceId: string,
+    password?: string,
+  ): Promise<boolean> {
+    if (!password) return false;
+    const user = await this.userRepo.findById(userId, workspaceId, {
+      includePassword: true,
+    });
+    return Boolean(
+      user &&
+        !isUserDisabled(user) &&
+        (await comparePasswordHash(password, user.password)),
+    );
+  }
+
+  async completeMfaSetup(setupId: string, code: string): Promise<string> {
+    const challenge = await this.mfa.verifySetupChallenge(setupId, code);
+    const user = await this.userRepo.findById(
+      challenge.userId,
+      challenge.workspaceId,
+    );
+    if (!user || isUserDisabled(user)) {
+      throw new UnauthorizedException('MFA setup user is unavailable');
+    }
     return this.sessionService.createSessionAndToken(user);
   }
 
@@ -159,7 +376,7 @@ export class AuthService {
       await this.userSessionRepo.deleteByUserId(userId, workspaceId);
     }
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.USER_PASSWORD_CHANGED,
       resourceType: AuditResource.USER,
       resourceId: userId,
@@ -183,6 +400,16 @@ export class AuthService {
     );
 
     if (!user || isUserDisabled(user)) {
+      return;
+    }
+
+    if (
+      !canUsePasswordLogin(
+        workspace.enforceSso,
+        user.role,
+        this.environmentService.isSsoCapabilityEnabled(),
+      )
+    ) {
       return;
     }
 
@@ -220,7 +447,7 @@ export class AuthService {
       template: emailTemplate,
     });
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.USER_PASSWORD_RESET_REQUESTED,
       resourceType: AuditResource.USER,
       resourceId: user.id,
@@ -250,6 +477,16 @@ export class AuthService {
     });
     if (!user || isUserDisabled(user)) {
       throw new NotFoundException('User not found');
+    }
+
+    if (
+      !canUsePasswordLogin(
+        workspace.enforceSso,
+        user.role,
+        this.environmentService.isSsoCapabilityEnabled(),
+      )
+    ) {
+      throw new BadRequestException('This workspace has enforced SSO login.');
     }
 
     const newPasswordHash = await hashPassword(passwordResetDto.newPassword);
@@ -288,7 +525,7 @@ export class AuthService {
     }
 
     this.auditService.setActorId(user.id);
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.USER_PASSWORD_RESET,
       resourceType: AuditResource.USER,
       resourceId: user.id,
@@ -347,5 +584,28 @@ export class AuthService {
       workspaceId,
     );
     return { token };
+  }
+
+  private async completeLogin(
+    user: User,
+    workspaceId: string,
+  ): Promise<LoginResult> {
+    if (await this.mfaGate.requiresChallenge(user.id, workspaceId)) {
+      if (!(await this.mfa.hasEnabledFactor(user.id, workspaceId))) {
+        const { challengeId: setupId } = await this.mfa.createChallenge(
+          user.id,
+          workspaceId,
+          'totp_setup',
+        );
+        return { mfaSetupRequired: true, setupId };
+      }
+      const { challengeId } = await this.mfa.createChallenge(
+        user.id,
+        workspaceId,
+        'totp',
+      );
+      return { mfaRequired: true, challengeId };
+    }
+    return { authToken: await this.sessionService.createSessionAndToken(user) };
   }
 }

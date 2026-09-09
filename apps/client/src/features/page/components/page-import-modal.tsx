@@ -5,7 +5,6 @@ import {
   FileButton,
   Group,
   Text,
-  Tooltip,
 } from "@mantine/core";
 import {
   IconBrandNotion,
@@ -31,13 +30,11 @@ import { useTranslation } from "react-i18next";
 import { ConfluenceIcon } from "@/components/icons/confluence-icon.tsx";
 import { getFileImportSizeLimit } from "@/lib/config.ts";
 import { formatBytes } from "@/lib";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
-import { useUpgradeLabel } from "@/ee/hooks/use-upgrade-label";
 import { getFileTaskById } from "@/features/file-task/services/file-task-service.ts";
 import { queryClient } from "@/main.tsx";
 import { useQueryEmit } from "@/features/websocket/use-query-emit.ts";
 import bytes from "bytes";
+import { getImportOutcome } from "./page-import.utils";
 
 interface PageImportModalProps {
   spaceId: string;
@@ -82,6 +79,7 @@ interface ImportFormatSelection {
   spaceId: string;
   onClose: () => void;
 }
+
 function ImportFormatSelection({ spaceId, onClose }: ImportFormatSelection) {
   const { t } = useTranslation();
   const [treeData, setTreeData] = useAtom(treeDataAtom);
@@ -95,11 +93,6 @@ function ImportFormatSelection({ spaceId, onClose }: ImportFormatSelection) {
   const notionFileRef = useRef<() => void>(null);
   const confluenceFileRef = useRef<() => void>(null);
   const zipFileRef = useRef<() => void>(null);
-
-  const canUseConfluence = useHasFeature(Feature.CONFLUENCE_IMPORT);
-  const canUseDocx = useHasFeature(Feature.DOCX_IMPORT);
-  const canUsePdf = useHasFeature(Feature.PDF_IMPORT);
-  const upgradeLabel = useUpgradeLabel();
 
   const handleZipUpload = async (selectedFile: File, source: string) => {
     if (!selectedFile) {
@@ -277,19 +270,18 @@ function ImportFormatSelection({ spaceId, onClose }: ImportFormatSelection) {
     });
 
     const pages: IPage[] = [];
-    let pageCount = 0;
+    const failedFiles: string[] = [];
 
     for (const file of selectedFiles) {
       try {
-        const page = await importPage(file, spaceId);
-        pages.push(page);
-        pageCount += 1;
-      } catch (err) {
-        console.log("Failed to import page", err);
+        pages.push(await importPage(file, spaceId));
+      } catch {
+        failedFiles.push(file.name);
       }
     }
 
-    if (pages?.length > 0 && pageCount > 0) {
+    const outcome = getImportOutcome(pages.length, failedFiles.length);
+    if (outcome !== "failed") {
       const newTreeNodes = buildTree(pages);
       const fullTree = treeData.concat(newTreeNodes);
 
@@ -304,13 +296,23 @@ function ImportFormatSelection({ spaceId, onClose }: ImportFormatSelection) {
       if (pdfFileRef.current) pdfFileRef.current();
 
       const pageCountText =
-        pageCount === 1 ? `1 ${t("page")}` : `${pageCount} ${t("pages")}`;
+        pages.length === 1 ? `1 ${t("page")}` : `${pages.length} ${t("pages")}`;
+      const isPartial = outcome === "partial";
 
       notifications.update({
         id: alert,
-        color: "teal",
-        title: `${t("Successfully imported")} ${pageCountText}`,
-        message: t("Your import is complete."),
+        color: isPartial ? "yellow" : "teal",
+        title: isPartial
+          ? t("Imported {{pages}}; {{failed}} failed", {
+              pages: pageCountText,
+              failed: failedFiles.length,
+            })
+          : `${t("Successfully imported")} ${pageCountText}`,
+        message: isPartial
+          ? t("{{count}} files could not be imported.", {
+              count: failedFiles.length,
+            })
+          : t("Your import is complete."),
         icon: <IconCheck size={18} />,
         loading: false,
         autoClose: 5000,
@@ -320,7 +322,9 @@ function ImportFormatSelection({ spaceId, onClose }: ImportFormatSelection) {
         id: alert,
         color: "red",
         title: t("Failed to import pages"),
-        message: t("Unable to import pages. Please try again."),
+        message: t("Unable to import {{count}} files. Please try again.", {
+          count: failedFiles.length,
+        }),
         icon: <IconX size={18} />,
         loading: false,
         autoClose: 5000,
@@ -380,24 +384,20 @@ function ImportFormatSelection({ spaceId, onClose }: ImportFormatSelection) {
           multiple
           resetRef={docxFileRef}
           inputProps={{
-            "aria-label": t("Choose {{format}} file", { format: "Word (DOCX)" }),
+            "aria-label": t("Choose {{format}} file", {
+              format: "Word (DOCX)",
+            }),
           }}
         >
           {(props) => (
-            <Tooltip
-              label={upgradeLabel}
-              disabled={canUseDocx}
+            <Button
+              justify="start"
+              variant="default"
+              leftSection={<IconFileTypeDocx size={18} />}
+              {...props}
             >
-              <Button
-                disabled={!canUseDocx}
-                justify="start"
-                variant="default"
-                leftSection={<IconFileTypeDocx size={18} />}
-                {...props}
-              >
-                Word (DOCX)
-              </Button>
-            </Tooltip>
+              Word (DOCX)
+            </Button>
           )}
         </FileButton>
 
@@ -411,20 +411,14 @@ function ImportFormatSelection({ spaceId, onClose }: ImportFormatSelection) {
           }}
         >
           {(props) => (
-            <Tooltip
-              label={upgradeLabel}
-              disabled={canUsePdf}
+            <Button
+              justify="start"
+              variant="default"
+              leftSection={<IconFileTypePdf size={18} />}
+              {...props}
             >
-              <Button
-                disabled={!canUsePdf}
-                justify="start"
-                variant="default"
-                leftSection={<IconFileTypePdf size={18} />}
-                {...props}
-              >
-                PDF
-              </Button>
-            </Tooltip>
+              PDF
+            </Button>
           )}
         </FileButton>
 
@@ -456,20 +450,14 @@ function ImportFormatSelection({ spaceId, onClose }: ImportFormatSelection) {
           }}
         >
           {(props) => (
-            <Tooltip
-              label={upgradeLabel}
-              disabled={canUseConfluence}
+            <Button
+              justify="start"
+              variant="default"
+              leftSection={<ConfluenceIcon size={18} />}
+              {...props}
             >
-              <Button
-                disabled={!canUseConfluence}
-                justify="start"
-                variant="default"
-                leftSection={<ConfluenceIcon size={18} />}
-                {...props}
-              >
-                Confluence
-              </Button>
-            </Tooltip>
+              Confluence
+            </Button>
           )}
         </FileButton>
       </SimpleGrid>

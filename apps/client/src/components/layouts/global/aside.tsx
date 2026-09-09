@@ -1,4 +1,11 @@
-import { ActionIcon, Box, Group, ScrollArea, Title, Tooltip } from "@mantine/core";
+import {
+  ActionIcon,
+  Box,
+  Group,
+  ScrollArea,
+  Title,
+  Tooltip,
+} from "@mantine/core";
 import { IconX } from "@tabler/icons-react";
 import { useAtom } from "jotai";
 import { asideStateAtom } from "@/components/layouts/global/hooks/atoms/sidebar-atom.ts";
@@ -12,12 +19,12 @@ const CommentListWithTabs = lazy(
   () => import("@/features/comment/components/comment-list-with-tabs.tsx"),
 );
 const TableOfContents = lazy(() =>
-  import(
-    "@/features/editor/components/table-of-contents/table-of-contents.tsx"
-  ).then((m) => ({ default: m.TableOfContents })),
+  import("@/features/editor/components/table-of-contents/table-of-contents.tsx").then(
+    (m) => ({ default: m.TableOfContents }),
+  ),
 );
 const AsideChatPanel = lazy(
-  () => import("@/ee/ai-chat/components/aside-chat-panel"),
+  () => import("@/features/ai/components/aside-chat-panel"),
 );
 const PageDetailsAside = lazy(() =>
   import("@/features/page-details/components/page-details-aside.tsx").then(
@@ -62,12 +69,17 @@ export default function Aside() {
   }
 
   return (
-    <Box p="md" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    <Box
+      p="md"
+      style={{ height: "100%", display: "flex", flexDirection: "column" }}
+    >
       {component && (
         <>
           {tab !== "chat" && (
             <Group justify="space-between" wrap="nowrap" mb="md">
-              <Title order={2} size="h6" fw={500}>{t(title)}</Title>
+              <Title order={2} size="h6" fw={500}>
+                {t(title)}
+              </Title>
               <Tooltip label={t("Close")} withArrow>
                 <ActionIcon
                   variant="subtle"

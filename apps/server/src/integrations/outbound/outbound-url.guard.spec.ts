@@ -108,6 +108,49 @@ describe('OutboundUrlGuard.validate', () => {
     expect(pinned).toEqual({ hostname: 'splunk.internal', address: '10.0.5.20', family: 4 });
   });
 
+  it('allows a self-hosted private IdP only when its exact hostname is configured', async () => {
+    const allowed = await guard(false, [{ address: '10.0.5.20', family: 4 }])
+      .validate('https://idp.internal', {
+        requireHttps: true,
+        privateHostnames: ['idp.internal'],
+        allowPrivateNetworks: false,
+      });
+    expect(allowed.address).toBe('10.0.5.20');
+
+    await expect(
+      guard(false, [{ address: '10.0.5.20', family: 4 }]).validate(
+        'https://other.internal',
+        {
+          requireHttps: true,
+          privateHostnames: ['idp.internal'],
+          allowPrivateNetworks: false,
+        },
+      ),
+    ).rejects.toThrow(/private address/);
+  });
+
+  it('does not use the general private-network policy when host-only mode is requested', async () => {
+    await expect(
+      guard(false, [{ address: '10.0.5.20', family: 4 }], 'all').validate(
+        'https://idp.internal',
+        { requireHttps: true, allowPrivateNetworks: false },
+      ),
+    ).rejects.toThrow(/private address/);
+  });
+
+  it('never permits metadata addresses through a private hostname allowlist', async () => {
+    await expect(
+      guard(false, [{ address: '169.254.169.254', family: 4 }]).validate(
+        'https://idp.internal',
+        {
+          requireHttps: true,
+          privateHostnames: ['idp.internal'],
+          allowPrivateNetworks: false,
+        },
+      ),
+    ).rejects.toThrow(/never allowed/);
+  });
+
   it('pins the first resolved address and keeps the hostname for SNI', async () => {
     const pinned = await guard(true, [{ address: '2606:4700::1111', family: 6 }, publicV4])
       .validate('https://siem.example.com');
@@ -212,19 +255,20 @@ describe('OutboundUrlGuard.validate', () => {
     },
   );
 
-  it('all still refuses loopback, and a loopback entry opts it back in', async () => {
+  it('refuses loopback even when an allowlist entry names it', async () => {
     await expect(
       guard(false, [{ address: '127.0.0.1', family: 4 }], 'all').validate(
         'http://siem.internal',
       ),
     ).rejects.toThrow(/loopback or reserved/);
 
-    const allowed = await guard(
-      false,
-      [{ address: '127.0.0.1', family: 4 }],
-      'all,127.0.0.0/8',
-    ).validate('http://siem.internal');
-    expect(allowed.address).toBe('127.0.0.1');
+    await expect(
+      guard(
+        false,
+        [{ address: '127.0.0.1', family: 4 }],
+        'all,127.0.0.0/8',
+      ).validate('http://siem.internal'),
+    ).rejects.toThrow(/loopback or reserved/);
 
     const lan = await guard(
       false,
@@ -263,29 +307,29 @@ describe('OutboundUrlGuard.validate', () => {
     ).rejects.toThrow(/private address/);
   });
 
-  it('a bracketed IPv6 entry with a port accepts only that port', async () => {
+  it('refuses loopback IPv6 even when an allowlist entry names its port', async () => {
     const policy = '[::1/128]:8088';
 
-    const allowed = await guard(
-      false,
-      [{ address: '::1', family: 6 }],
-      policy,
-    ).validate('http://[::1]:8088/ingest');
-    expect(allowed).toEqual({ hostname: '::1', address: '::1', family: 6 });
+    await expect(
+      guard(false, [{ address: '::1', family: 6 }], policy).validate(
+        'http://[::1]:8088/ingest',
+      ),
+    ).rejects.toThrow(/loopback or reserved/);
 
     await expect(
       guard(false, [{ address: '::1', family: 6 }], policy).validate('http://[::1]/ingest'),
     ).rejects.toThrow(/loopback or reserved/);
   });
 
-  it('an entry without a port matches every port', async () => {
+  it('refuses loopback at every port even when an allowlist entry names it', async () => {
     for (const url of ['http://127.0.0.1:8088', 'https://127.0.0.1', 'http://127.0.0.1']) {
-      const allowed = await guard(
-        false,
-        [{ address: '127.0.0.1', family: 4 }],
-        '127.0.0.0/8',
-      ).validate(url);
-      expect(allowed.address).toBe('127.0.0.1');
+      await expect(
+        guard(
+          false,
+          [{ address: '127.0.0.1', family: 4 }],
+          '127.0.0.0/8',
+        ).validate(url),
+      ).rejects.toThrow(/loopback or reserved/);
     }
   });
 

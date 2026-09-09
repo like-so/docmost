@@ -3,13 +3,12 @@ import { Button } from "@mantine/core";
 import { IconTable, IconLayoutKanban } from "@tabler/icons-react";
 import { useTranslation } from "react-i18next";
 import { useAtomValue } from "jotai";
-import { useConvertPageToBaseMutation } from "@/ee/base/queries/base-query";
+import { convertToBase } from "@/features/base/services/base-service";
 import {
   pageEditorAtom,
   yjsSyncedAtom,
 } from "@/features/editor/atoms/editor-atoms";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
+import { useMutation } from "@tanstack/react-query";
 import classes from "./empty-page-get-started.module.css";
 
 type EmptyPageGetStartedProps = {
@@ -24,8 +23,7 @@ export function EmptyPageGetStarted({
   const { t } = useTranslation();
   const editor = useAtomValue(pageEditorAtom);
   const isSynced = useAtomValue(yjsSyncedAtom);
-  const hasBases = useHasFeature(Feature.BASES);
-  const convertMutation = useConvertPageToBaseMutation();
+  const convertMutation = useMutation({ mutationFn: ({ pageId }: { pageId: string }) => convertToBase(pageId) });
 
   const [isEmpty, setIsEmpty] = useState(false);
   useEffect(() => {
@@ -40,7 +38,7 @@ export function EmptyPageGetStarted({
     };
   }, [editor]);
 
-  if (!editable || !hasBases || !editor || !isSynced || !isEmpty) return null;
+  if (!editable || !editor || !isSynced || !isEmpty) return null;
 
   const chips = [
     {
@@ -54,7 +52,7 @@ export function EmptyPageGetStarted({
       key: "kanban",
       label: t("Kanban"),
       icon: IconLayoutKanban,
-      onClick: () => convertMutation.mutate({ pageId, template: "kanban" }),
+      onClick: () => convertMutation.mutate({ pageId }),
       disabled: convertMutation.isPending,
     },
   ];

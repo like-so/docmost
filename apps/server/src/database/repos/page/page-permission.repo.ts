@@ -35,6 +35,33 @@ export class PagePermissionRepo {
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
+  async invalidatePermissionCache(
+    pageId: string,
+    workspaceId: string,
+  ): Promise<void> {
+    const pageIds = await sql<{ id: string }>`
+      WITH RECURSIVE affected AS (
+        SELECT id FROM pages WHERE id = ${pageId}::uuid
+        UNION ALL
+        SELECT pages.id FROM pages JOIN affected ON pages.parent_page_id = affected.id
+        WHERE pages.deleted_at IS NULL
+      )
+      SELECT id FROM affected
+    `.execute(this.db);
+    const users = await this.db
+      .selectFrom('users')
+      .select('id')
+      .where('workspaceId', '=', workspaceId)
+      .execute();
+    await Promise.all(
+      pageIds.rows.flatMap((page) =>
+        users.map((user) =>
+          this.cacheManager.del(CacheKey.PAGE_CAN_EDIT(user.id, page.id)),
+        ),
+      ),
+    );
+  }
+
   async findPageAccessByPageId(
     pageId: string,
     trx?: KyselyTransaction,
@@ -155,6 +182,17 @@ export class PagePermissionRepo {
       .deleteFrom('pagePermissions')
       .where('pageAccessId', '=', pageAccessId)
       .where('groupId', 'in', groupIds)
+      .execute();
+  }
+
+  async deletePagePermissions(
+    pageAccessId: string,
+    trx?: KyselyTransaction,
+  ): Promise<void> {
+    const db = dbOrTx(this.db, trx);
+    await db
+      .deleteFrom('pagePermissions')
+      .where('pageAccessId', '=', pageAccessId)
       .execute();
   }
 

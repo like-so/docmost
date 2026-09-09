@@ -17,9 +17,6 @@ import {
 import classes from "./slash-menu.module.css";
 import clsx from "clsx";
 import { useTranslation } from "react-i18next";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
-import { useUpgradeLabel } from "@/ee/hooks/use-upgrade-label";
 
 const CommandList = ({
   items,
@@ -38,13 +35,7 @@ const CommandList = ({
   const [countAnnouncement, setCountAnnouncement] = useState("");
   const [selectionAnnouncement, setSelectionAnnouncement] = useState("");
 
-  const hasBases = useHasFeature(Feature.BASES);
-  const upgradeLabel = useUpgradeLabel();
-  // Without the bases entitlement the item stays visible but inert; an
-  // expired license the client can't detect falls through to a handled
-  // create failure.
-  const isItemDisabled = (item: SlashMenuItemType) =>
-    !hasBases && item.requiresBases === true;
+  const isItemDisabled = (_item: SlashMenuItemType) => false;
 
   const flatItems = useMemo(() => {
     return Object.values(items).flat();
@@ -57,7 +48,7 @@ const CommandList = ({
         command(item);
       }
     },
-    [command, flatItems, hasBases],
+    [command, flatItems],
   );
 
   useEffect(() => {
@@ -157,7 +148,7 @@ const CommandList = ({
               return (
               <Tooltip
                 key={itemIndex}
-                label={upgradeLabel}
+                label="Unavailable"
                 disabled={!disabled}
                 position="right"
               >

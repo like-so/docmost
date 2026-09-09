@@ -24,8 +24,6 @@ import { useGetSpacesQuery } from "@/features/space/queries/space-query";
 import { SpaceFilterMenu } from "@/features/space/components/space-filter-menu";
 import { CreatorFilterMenu } from "@/features/search/components/creator-filter-menu";
 import { RadioMenuItem } from "@/components/ui/radio-menu-item";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
 import classes from "./search-spotlight-filters.module.css";
 import { useAtom } from "jotai";
 import { workspaceAtom } from "@/features/user/atoms/current-user-atom.ts";
@@ -45,7 +43,6 @@ export function SearchSpotlightFilters({
   isAiMode = false,
 }: SearchSpotlightFiltersProps) {
   const { t } = useTranslation();
-  const hasAttachmentIndexing = useHasFeature(Feature.ATTACHMENT_INDEXING);
   const [selectedSpaceId, setSelectedSpaceId] = useState<string | null>(
     spaceId || null
   );
@@ -70,7 +67,6 @@ export function SearchSpotlightFilters({
     {
       value: "attachment",
       label: t("Attachments"),
-      disabled: !hasAttachmentIndexing,
     },
   ];
 
@@ -226,23 +222,17 @@ export function SearchSpotlightFilters({
               component={RadioMenuItem}
               aria-checked={contentType === option.value}
               onClick={() =>
-                !option.disabled &&
                 contentType !== option.value &&
                 handleChangeContentType(option.value)
               }
               disabled={
-                option.disabled || (isAiMode && option.value === "attachment")
+                (isAiMode && option.value === "attachment")
               }
             >
               <Group flex="1" gap="xs">
                 <div>
                   <Text size="sm">{option.label}</Text>
-                  {option.disabled && (
-                    <Badge size="xs" mt={4}>
-                      {t("Enterprise")}
-                    </Badge>
-                  )}
-                  {!option.disabled && isAiMode && option.value === "attachment" && (
+                  {isAiMode && option.value === "attachment" && (
                     <Text size="xs" mt={4}>
                       {t("AI Answers not available for attachments")}
                     </Text>

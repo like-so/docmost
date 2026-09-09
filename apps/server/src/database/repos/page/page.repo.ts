@@ -39,6 +39,7 @@ export class PageRepo {
     'workspaceId',
     'isLocked',
     'isBase',
+    'baseSchemaVersion',
     'createdAt',
     'updatedAt',
     'deletedAt',

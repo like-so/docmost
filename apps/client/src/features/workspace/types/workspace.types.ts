@@ -1,5 +1,3 @@
-import { IAuthProvider } from "@/ee/security/types/security.types.ts";
-
 export interface IWorkspace {
   id: string;
   name: string;
@@ -106,13 +104,19 @@ export interface IAcceptInvite {
   token: string;
 }
 
-export interface IPublicWorkspace {
+export interface IPublicAuthProvider {
+  id: string;
+  name: string;
+  type: string;
+}
+
+export interface IPublicWorkspace<TProvider = any> {
   id: string;
   name: string;
   logo: string;
   hostname: string;
   enforceSso: boolean;
-  authProviders: IAuthProvider[];
+  authProviders: TProvider[];
 }
 
 export interface IVersion {

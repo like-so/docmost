@@ -25,7 +25,6 @@ import CopyTextButton from "@/components/common/copy.tsx";
 import { getAppUrl, isCloud } from "@/lib/config.ts";
 import { buildPageUrl } from "@/features/page/page.utils.ts";
 import classes from "@/features/share/components/share.module.css";
-import useTrial from "@/ee/hooks/use-trial.tsx";
 import { useAtom } from "jotai";
 import { workspaceAtom } from "@/features/user/atoms/current-user-atom.ts";
 import { useSpaceQuery } from "@/features/space/queries/space-query.ts";
@@ -42,7 +41,6 @@ export default function ShareModal({ readOnly }: ShareModalProps) {
   const pageId = page?.id;
   const { data: share } = useShareForPageQuery(pageId);
   const { spaceSlug } = useParams();
-  const { isTrial } = useTrial();
   const [workspace] = useAtom(workspaceAtom);
   const { data: space } = useSpaceQuery(spaceSlug);
   const workspaceDisabled = workspace?.settings?.sharing?.disabled === true;
@@ -160,7 +158,7 @@ export default function ShareModal({ readOnly }: ShareModalProps) {
         </Button>
       </Popover.Target>
       <Popover.Dropdown style={{ userSelect: "none" }}>
-        {isCloud() && isTrial ? (
+        {false ? (
           <>
             <Group justify="center" mb="sm">
               <IconLock size={20} stroke={1.5} />

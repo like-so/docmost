@@ -2,7 +2,6 @@ import {
   ColorInput,
   Group,
   Text,
-  Tooltip,
   UnstyledButton,
 } from "@mantine/core";
 import { IconColorPicker } from "@tabler/icons-react";
@@ -16,9 +15,6 @@ import {
 } from "@/features/public-space/theme/docs-theme.ts";
 import { IPublicSpaceAppearance } from "@/features/public-space/types/public-space.types.ts";
 import { usePublishSpaceMutation } from "@/features/public-space/queries/public-space-query.ts";
-import { useHasFeature } from "@/ee/hooks/use-feature.ts";
-import { useUpgradeLabel } from "@/ee/hooks/use-upgrade-label.ts";
-import { Feature } from "@/ee/features.ts";
 import classes from "./appearance-settings.module.css";
 
 type AppearanceSettingsProps = {
@@ -32,8 +28,6 @@ export default function AppearanceSettings({
 }: AppearanceSettingsProps) {
   const { t } = useTranslation();
   const publishMutation = usePublishSpaceMutation();
-  const hasAppearance = useHasFeature(Feature.PUBLIC_SPACE_APPEARANCE);
-  const upgradeLabel = useUpgradeLabel();
 
   const matchedPreset = matchDocsPreset(appearance);
   const [customOpen, setCustomOpen] = useState(matchedPreset === null);
@@ -54,7 +48,6 @@ export default function AppearanceSettings({
     primaryColorLight: string | null;
     primaryColorDark: string | null;
   }) => {
-    if (!hasAppearance) return;
     publishMutation.mutate({ spaceId, enabled: true, appearance: payload });
   };
 
@@ -91,12 +84,7 @@ export default function AppearanceSettings({
         {t("Choose the primary color of the public docs site.")}
       </Text>
 
-      <Tooltip
-        label={upgradeLabel}
-        disabled={hasAppearance}
-        position="top-start"
-      >
-        <div className={classes.presetRow} style={{ marginTop: 10 }}>
+      <div className={classes.presetRow} style={{ marginTop: 10 }}>
           {DOCS_THEME_PRESETS.map((preset) => {
             const selected = !customOpen && matchedPreset?.id === preset.id;
             return (
@@ -105,7 +93,6 @@ export default function AppearanceSettings({
                 className={classes.presetCard}
                 data-selected={selected || undefined}
                 aria-pressed={selected}
-                disabled={!hasAppearance}
                 onClick={() => selectPreset(preset.id)}
               >
                 <span
@@ -123,7 +110,6 @@ export default function AppearanceSettings({
             className={classes.presetCard}
             data-selected={customOpen || undefined}
             aria-pressed={customOpen}
-            disabled={!hasAppearance}
             onClick={() => setCustomOpen(true)}
           >
             <span className={classes.customSwatch}>
@@ -131,10 +117,9 @@ export default function AppearanceSettings({
             </span>
             <Text size="xs">{t("Custom")}</Text>
           </UnstyledButton>
-        </div>
-      </Tooltip>
+      </div>
 
-      {customOpen && hasAppearance && (
+      {customOpen && (
         <Group grow mt="sm" align="flex-start">
           <ColorInput
             label={t("Light mode color")}

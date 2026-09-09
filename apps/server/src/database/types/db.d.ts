@@ -37,6 +37,8 @@ export interface ApiKeys {
   id: Generated<string>;
   lastUsedAt: Timestamp | null;
   name: string | null;
+  scopes: Json | null;
+  secretHash: string | null;
   updatedAt: Generated<Timestamp>;
   creatorId: string;
   workspaceId: string;
@@ -398,6 +400,15 @@ export interface SiemDestinations {
   workspaceId: string;
 }
 
+export interface SiemDeliveryOutbox {
+  auditId: string;
+  createdAt: Generated<Timestamp>;
+  deliveredAt: Timestamp | null;
+  destinationId: string;
+  id: Generated<string>;
+  workspaceId: string;
+}
+
 export interface Spaces {
   createdAt: Generated<Timestamp>;
   creatorId: string | null;
@@ -581,6 +592,14 @@ export interface PagePermissions {
   updatedAt: Generated<Timestamp>;
 }
 
+export interface PageReadConfirmations {
+  id: Generated<string>;
+  pageId: string;
+  userId: string;
+  workspaceId: string;
+  readAt: Generated<Timestamp>;
+}
+
 export interface PageVerifications {
   id: Generated<string>;
   pageId: string;
@@ -688,6 +707,23 @@ export interface OauthAuthorizationCodes {
   workspaceId: string;
 }
 
+export interface OauthAuthorizationTransactions {
+  clientId: string;
+  codeChallenge: string;
+  consumedAt: Timestamp | null;
+  createdAt: Generated<Timestamp>;
+  csrfHash: string;
+  expiresAt: Timestamp;
+  id: Generated<string>;
+  redirectUri: string;
+  scopes: Json;
+  sessionId: string;
+  state: string | null;
+  tokenHash: string;
+  userId: string;
+  workspaceId: string;
+}
+
 export interface OauthClients {
   clientUri: string | null;
   createdAt: Generated<Timestamp>;
@@ -715,6 +751,17 @@ export interface OauthGrants {
   updatedAt: Generated<Timestamp>;
   userId: string;
   workspaceId: string;
+}
+
+export interface GroupMembershipSources {
+  createdAt: Generated<Timestamp>;
+  createdMembership: Generated<boolean>;
+  groupId: string;
+  id: Generated<string>;
+  source: string;
+  providerId: string;
+  updatedAt: Generated<Timestamp>;
+  userId: string;
 }
 
 export interface OauthTokens {
@@ -748,6 +795,7 @@ export interface DB {
   fileTasks: FileTasks;
   groups: Groups;
   groupUsers: GroupUsers;
+  groupMembershipSources: GroupMembershipSources;
   labels: Labels;
   notifications: Notifications;
   pageAccess: PageAccess;
@@ -756,6 +804,7 @@ export interface DB {
   pagePermissions: PagePermissions;
   pageHistory: PageHistory;
   pageLabels: PageLabels;
+  pageReadConfirmations: PageReadConfirmations;
   pageVerifications: PageVerifications;
   pageVerifiers: PageVerifiers;
   pages: Pages;
@@ -763,6 +812,7 @@ export interface DB {
   scimTokens: ScimTokens;
   shares: Shares;
   siemDestinations: SiemDestinations;
+  siemDeliveryOutbox: SiemDeliveryOutbox;
   spaceMembers: SpaceMembers;
   spaces: Spaces;
   templates: Templates;
@@ -774,6 +824,7 @@ export interface DB {
   workspaceInvitations: WorkspaceInvitations;
   workspaces: Workspaces;
   oauthAuthorizationCodes: OauthAuthorizationCodes;
+  oauthAuthorizationTransactions: OauthAuthorizationTransactions;
   oauthClients: OauthClients;
   oauthGrants: OauthGrants;
   oauthTokens: OauthTokens;

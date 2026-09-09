@@ -40,11 +40,12 @@ type SizeBudget = { used: number; max: number };
 export async function extractZip(
   source: string,
   target: string,
+  maxExtractedBytes: number,
 ): Promise<void> {
   const { size: compressedSize } = await fs.promises.stat(source);
-  const max = Math.max(
-    compressedSize * COMPRESSION_HEADROOM,
-    MIN_EXTRACTED_BYTES,
+  const max = Math.min(
+    maxExtractedBytes,
+    Math.max(compressedSize * COMPRESSION_HEADROOM, MIN_EXTRACTED_BYTES),
   );
   return extractZipInternal(source, target, true, { used: 0, max });
 }
@@ -131,9 +132,10 @@ function extractZipInternal(
 
           const validationError = yauzl.validateFileName(safe);
           if (validationError) {
-            console.warn(`Skipping invalid entry (${validationError})`);
-            zipfile.readEntry();
-            return;
+            zipfile.close();
+            return reject(
+              new Error(`Invalid archive entry: ${validationError}`),
+            );
           }
 
           if (safe.startsWith('__MACOSX/')) {
@@ -147,9 +149,10 @@ function extractZipInternal(
           const targetResolved = path.resolve(target);
 
           if (!resolved.startsWith(targetResolved + path.sep)) {
-            console.warn(`Skipping entry (path outside target): ${safe}`);
-            zipfile.readEntry();
-            return;
+            zipfile.close();
+            return reject(
+              new Error('Archive entry is outside the extraction directory'),
+            );
           }
 
           // Handle directories
@@ -158,9 +161,8 @@ function extractZipInternal(
               fs.mkdirSync(fullPath, { recursive: true });
             } catch (mkdirErr: any) {
               if (mkdirErr.code === 'ENAMETOOLONG') {
-                console.warn(`Skipping directory (path too long): ${fullPath}`);
-                zipfile.readEntry();
-                return;
+                zipfile.close();
+                return reject(new Error('Archive entry path is too long'));
               }
               return reject(mkdirErr);
             }
@@ -182,11 +184,8 @@ function extractZipInternal(
             fs.mkdirSync(path.dirname(fullPath), { recursive: true });
           } catch (mkdirErr: any) {
             if (mkdirErr.code === 'ENAMETOOLONG') {
-              console.warn(
-                `Skipping file directory creation (path too long): ${fullPath}`,
-              );
-              zipfile.readEntry();
-              return;
+              zipfile.close();
+              return reject(new Error('Archive entry path is too long'));
             }
             return reject(mkdirErr);
           }
@@ -199,11 +198,8 @@ function extractZipInternal(
               ws = fs.createWriteStream(fullPath);
             } catch (openWsErr: any) {
               if (openWsErr.code === 'ENAMETOOLONG') {
-                console.warn(
-                  `Skipping file write (path too long): ${fullPath}`,
-                );
-                zipfile.readEntry();
-                return;
+                zipfile.close();
+                return reject(new Error('Archive entry path is too long'));
               }
               return reject(openWsErr);
             }
@@ -211,10 +207,8 @@ function extractZipInternal(
             rs.on('error', (err) => reject(err));
             ws.on('error', (err) => {
               if ((err as any).code === 'ENAMETOOLONG') {
-                console.warn(
-                  `Skipping file write on stream (path too long): ${fullPath}`,
-                );
-                zipfile.readEntry();
+                zipfile.close();
+                reject(new Error('Archive entry path is too long'));
               } else {
                 reject(err);
               }
@@ -236,3 +230,20 @@ export function cleanUrlString(url: string): string {
   const [mainUrl] = url.split('?', 1);
   return mainUrl;
 }
+
+export function isImportMime(extension: string, mimeType?: string): boolean {
+  if (!mimeType) return false;
+  const allowed = importMimeTypes[extension];
+  return allowed ? allowed.has(mimeType.toLowerCase()) : false;
+}
+
+const importMimeTypes: Record<string, Set<string>> = {
+  '.md': new Set(['text/markdown', 'text/plain', 'application/octet-stream']),
+  '.html': new Set(['text/html', 'application/xhtml+xml']),
+  '.docx': new Set([
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/zip',
+    'application/octet-stream',
+  ]),
+  '.pdf': new Set(['application/pdf']),
+};

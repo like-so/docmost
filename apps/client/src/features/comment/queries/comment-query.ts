@@ -8,6 +8,7 @@ import {
   createComment,
   deleteComment,
   getPageComments,
+  resolveComment,
   updateComment,
 } from "@/features/comment/services/comment-service";
 import {
@@ -158,4 +159,13 @@ export function useDeleteCommentMutation(pageId?: string) {
   });
 }
 
-// EE: useResolveCommentMutation has been moved to @/ee/comment/queries/comment-query
+export function useResolveCommentMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: resolveComment,
+    onSuccess: (comment) => {
+      queryClient.invalidateQueries({ queryKey: RQ_KEY(comment.pageId) });
+    },
+  });
+}

@@ -79,6 +79,10 @@ export class EnvironmentService {
     return this.configService.get<string>('GOTENBERG_URL');
   }
 
+  getGotenbergRequestTimeoutMs(): number {
+    return this.getBoundedTimeout('GOTENBERG_REQUEST_TIMEOUT_MS', 10_000);
+  }
+
   getStorageDriver(): string {
     return this.configService.get<string>('STORAGE_DRIVER', 'local');
   }
@@ -89,6 +93,32 @@ export class EnvironmentService {
 
   getFileImportSizeLimit(): string {
     return this.configService.get<string>('FILE_IMPORT_SIZE_LIMIT', '200mb');
+  }
+
+  getAiRequestTimeoutMs(): number {
+    return this.getBoundedTimeout('AI_REQUEST_TIMEOUT_MS', 30_000);
+  }
+
+  getSiemRequestTimeoutMs(): number {
+    return this.getBoundedTimeout('SIEM_REQUEST_TIMEOUT_MS', 10_000);
+  }
+
+  getSiemReconcileIntervalMs(): number {
+    return this.getBoundedTimeout(
+      'SIEM_RECONCILE_INTERVAL_MS',
+      5 * 60 * 1000,
+      60 * 1000,
+      24 * 60 * 60 * 1000,
+    );
+  }
+
+  getVerificationReconcileIntervalMs(): number {
+    return this.getBoundedTimeout(
+      'PAGE_VERIFICATION_RECONCILE_INTERVAL_MS',
+      60 * 60 * 1000,
+      60 * 1000,
+      24 * 60 * 60 * 1000,
+    );
   }
 
   getAwsS3AccessKeyId(): string {
@@ -199,6 +229,17 @@ export class EnvironmentService {
     return this.configService.get<string>('POSTMARK_TOKEN');
   }
 
+  private getBoundedTimeout(
+    name: string,
+    fallback: number,
+    minimum = 1_000,
+    maximum = 5 * 60 * 1000,
+  ): number {
+    const value = Number(this.configService.get<string>(name, `${fallback}`));
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(Math.max(Math.trunc(value), minimum), maximum);
+  }
+
   getDrawioUrl(): string {
     return this.configService.get<string>('DRAWIO_URL');
   }
@@ -212,6 +253,21 @@ export class EnvironmentService {
 
   isSelfHosted(): boolean {
     return !this.isCloud();
+  }
+
+  isSsoCapabilityEnabled(): boolean {
+    return (
+      this.configService.get<string>('SSO_ENABLED', 'true').toLowerCase() ===
+      'true'
+    );
+  }
+
+  isSecurityControlsEnabled(): boolean {
+    return (
+      this.configService
+        .get<string>('SECURITY_CONTROLS_ENABLED', 'true')
+        .toLowerCase() === 'true'
+    );
   }
 
   getStripePublishableKey(): string {
@@ -395,5 +451,21 @@ export class EnvironmentService {
 
   getAllowedPrivateNetworks(): string {
     return this.configService.get<string>('ALLOWED_PRIVATE_NETWORKS', 'none');
+  }
+
+  getOidcPrivateHosts(): string[] {
+    return this.getAllowedHosts('OIDC_PRIVATE_HOSTS');
+  }
+
+  getLdapPrivateHosts(): string[] {
+    return this.getAllowedHosts('LDAP_PRIVATE_HOSTS');
+  }
+
+  private getAllowedHosts(name: string): string[] {
+    return this.configService
+      .get<string>(name, '')
+      .split(',')
+      .map((host) => host.trim().toLowerCase().replace(/\.$/, ''))
+      .filter(Boolean);
   }
 }

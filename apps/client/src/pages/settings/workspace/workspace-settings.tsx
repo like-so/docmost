@@ -2,12 +2,10 @@ import SettingsTitle from "@/components/settings/settings-title.tsx";
 import WorkspaceNameForm from "@/features/workspace/components/settings/components/workspace-name-form";
 import WorkspaceIcon from "@/features/workspace/components/settings/components/workspace-icon.tsx";
 import { useTranslation } from "react-i18next";
-import { isBetaPublicSpaces, isCloud } from "@/lib/config.ts";
-import ManageHostname from "@/ee/components/manage-hostname.tsx";
+import { isBetaPublicSpaces } from "@/lib/config.ts";
 import { Divider } from "@mantine/core";
-import AllowMemberTemplates from "@/ee/security/components/allow-member-templates.tsx";
 import WorkspaceDefaultPageEditMode from "@/features/workspace/components/settings/components/workspace-default-page-edit-mode.tsx";
-import PersonalSpacesSetting from "@/ee/personal-space/components/personal-spaces-setting.tsx";
+import { WorkspaceCapability } from "@/features/workspace/components/settings/components/workspace-capabilities.tsx";
 import AllowPublicSpaces from "@/features/workspace/components/settings/components/allow-public-spaces.tsx";
 import { DocumentTitle } from "@/components/ui/document-title.tsx";
 
@@ -21,22 +19,23 @@ export default function WorkspaceSettings() {
       <WorkspaceNameForm />
 
       <Divider my="md" />
-      <AllowMemberTemplates />
+      <WorkspaceCapability
+        setting="templates"
+        title={t("Allow member templates")}
+        description={t("Allow members to create and use workspace templates.")}
+      />
 
       <Divider my="md" />
-      <PersonalSpacesSetting />
+      <WorkspaceCapability
+        setting="spaces"
+        title={t("Allow personal spaces")}
+        description={t("Allow members to use a private personal space.")}
+      />
 
       {isBetaPublicSpaces() && (
         <>
           <Divider my="md" />
           <AllowPublicSpaces />
-        </>
-      )}
-
-      {isCloud() && (
-        <>
-          <Divider my="md" />
-          <ManageHostname />
         </>
       )}
 

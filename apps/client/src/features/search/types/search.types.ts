@@ -56,7 +56,7 @@ export interface IAttachmentSearch {
     id: string;
     name: string;
     slug: string;
-    icon: string;
+    logo: string;
   };
   page: {
     id: string;

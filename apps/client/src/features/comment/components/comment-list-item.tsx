@@ -8,15 +8,12 @@ import { pageEditorAtom } from "@/features/editor/atoms/editor-atoms";
 import { isEditorReady } from "@docmost/editor-ext";
 import CommentActions from "@/features/comment/components/comment-actions";
 import CommentMenu from "@/features/comment/components/comment-menu";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
-import ResolveComment from "@/ee/comment/components/resolve-comment";
 import { useHover } from "@mantine/hooks";
 import {
   useDeleteCommentMutation,
   useUpdateCommentMutation,
+  useResolveCommentMutation,
 } from "@/features/comment/queries/comment-query";
-import { useResolveCommentMutation } from "@/ee/comment/queries/comment-query";
 import { IComment } from "@/features/comment/types/comment.types";
 import { CustomAvatar } from "@/components/ui/custom-avatar.tsx";
 import { currentUserAtom } from "@/features/user/atoms/current-user-atom.ts";
@@ -46,7 +43,7 @@ function CommentListItem({
   const deleteCommentMutation = useDeleteCommentMutation(comment.pageId);
   const resolveCommentMutation = useResolveCommentMutation();
   const [currentUser] = useAtom(currentUserAtom);
-  const canResolve = useHasFeature(Feature.COMMENT_RESOLUTION);
+  const canResolve = true;
   const createdAtAgo = useTimeAgo(comment.createdAt);
 
   useEffect(() => {
@@ -141,15 +138,6 @@ function CommentListItem({
             </Text>
 
             <div style={{ visibility: hovered ? "visible" : "hidden" }}>
-              {!comment.parentCommentId && canComment && canResolve && (
-                <ResolveComment
-                  editor={editor}
-                  commentId={comment.id}
-                  pageId={comment.pageId}
-                  resolvedAt={comment.resolvedAt}
-                />
-              )}
-
               {(currentUser?.user?.id === comment.creatorId || userSpaceRole === 'admin') && (
                 <CommentMenu
                   onEditComment={handleEditToggle}

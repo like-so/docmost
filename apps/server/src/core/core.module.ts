@@ -25,6 +25,14 @@ import { WatcherModule } from './watcher/watcher.module';
 import { FavoriteModule } from './favorite/favorite.module';
 import { SessionModule } from './session/session.module';
 import { ClsMiddleware } from 'nestjs-cls';
+import { AuthProviderModule } from './auth-provider/auth-provider.module';
+import { ApiKeyModule } from './api-key/api-key.module';
+import { OAuthModule } from './oauth/oauth.module';
+import { TemplateModule } from './template/template.module';
+import { PersonalSpaceModule } from './personal-space/personal-space.module';
+import { PageVerificationModule } from './page-verification/page-verification.module';
+import { AiModule } from './ai/ai.module';
+import { BaseModule } from './base/base.module';
 
 @Module({
   imports: [
@@ -46,6 +54,14 @@ import { ClsMiddleware } from 'nestjs-cls';
     NotificationModule,
     WatcherModule,
     SessionModule,
+    AuthProviderModule,
+    ApiKeyModule,
+    OAuthModule,
+    TemplateModule,
+    PersonalSpaceModule,
+    PageVerificationModule,
+    AiModule,
+    BaseModule,
   ],
 })
 export class CoreModule implements NestModule {

@@ -1,19 +1,19 @@
 import { queryClient } from "@/main.tsx";
-import {
-  getBilling,
-  getBillingPlans,
-} from "@/ee/billing/services/billing-service.ts";
 import { getSpaces } from "@/features/space/services/space-service.ts";
 import { getGroups } from "@/features/group/services/group-service.ts";
 import { QueryParams } from "@/lib/types.ts";
 import { getWorkspaceMembers } from "@/features/workspace/services/workspace-service.ts";
-import { getLicenseInfo } from "@/ee/licence/services/license-service.ts";
-import { getSsoProviders } from "@/ee/security/services/security-service.ts";
+import {
+  getProviders,
+  getScimTokens,
+} from "@/features/security/services/security-service.ts";
 import { getShares } from "@/features/share/services/share-service.ts";
-import { getApiKeys } from "@/ee/api-key";
-import { getAuditLogs } from "@/ee/audit/services/audit-service";
-import { getVerificationList } from "@/ee/page-verification/services/page-verification-service";
-import { getScimTokens } from "@/ee/scim/services/scim-token-service";
+import {
+  listApiKeys,
+  listWorkspaceApiKeys,
+} from "@/features/api-key/services/api-key-service.ts";
+import { listPageVerifications } from "@/features/page-verification/services/page-verification-service.ts";
+import api from "@/lib/api-client.ts";
 
 export const prefetchWorkspaceMembers = () => {
   const params: QueryParams = { limit: 100, query: "" };
@@ -37,29 +37,10 @@ export const prefetchGroups = () => {
   });
 };
 
-export const prefetchBilling = () => {
-  queryClient.prefetchQuery({
-    queryKey: ["billing"],
-    queryFn: () => getBilling(),
-  });
-
-  queryClient.prefetchQuery({
-    queryKey: ["billing-plans"],
-    queryFn: () => getBillingPlans(),
-  });
-};
-
-export const prefetchLicense = () => {
-  queryClient.prefetchQuery({
-    queryKey: ["license"],
-    queryFn: () => getLicenseInfo(),
-  });
-};
-
 export const prefetchSsoProviders = () => {
   queryClient.prefetchQuery({
-    queryKey: ["sso-providers"],
-    queryFn: () => getSsoProviders(),
+    queryKey: ["security-providers"],
+    queryFn: getProviders,
   });
 };
 
@@ -73,14 +54,14 @@ export const prefetchShares = () => {
 export const prefetchApiKeys = () => {
   queryClient.prefetchQuery({
     queryKey: ["api-key-list", {}],
-    queryFn: () => getApiKeys({}),
+    queryFn: listApiKeys,
   });
 };
 
 export const prefetchApiKeyManagement = () => {
   queryClient.prefetchQuery({
     queryKey: ["api-key-list", { adminView: true }],
-    queryFn: () => getApiKeys({ adminView: true }),
+    queryFn: listWorkspaceApiKeys,
   });
 };
 
@@ -88,7 +69,7 @@ export const prefetchAuditLogs = () => {
   const params = { limit: 50 };
   queryClient.prefetchQuery({
     queryKey: ["audit-logs", params],
-    queryFn: () => getAuditLogs(params),
+    queryFn: async () => (await api.post("/security/audit/list", params)).data,
   });
 };
 
@@ -96,13 +77,13 @@ export const prefetchVerifiedPages = () => {
   const params = { limit: 50 };
   queryClient.prefetchQuery({
     queryKey: ["verification-list", params],
-    queryFn: () => getVerificationList(params),
+    queryFn: listPageVerifications,
   });
 };
 
 export const prefetchScimTokens = () => {
   queryClient.prefetchQuery({
-    queryKey: ["scim-token-list", { cursor: undefined }],
-    queryFn: () => getScimTokens({}),
+    queryKey: ["security-scim-tokens"],
+    queryFn: getScimTokens,
   });
 };

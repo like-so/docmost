@@ -29,7 +29,6 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { Public } from '../../common/decorators/public.decorator';
 import { ShareRepo } from '@docmost/db/repos/share/share.repo';
 import { PaginationOptions } from '@docmost/db/pagination/pagination-options';
-import { LicenseCheckService } from '../../integrations/environment/license-check.service';
 import { AuditEvent, AuditResource } from '../../common/events/audit-events';
 import {
   AUDIT_SERVICE,
@@ -45,7 +44,6 @@ export class ShareController {
     private readonly pageRepo: PageRepo,
     private readonly pagePermissionRepo: PagePermissionRepo,
     private readonly pageAccessService: PageAccessService,
-    private readonly licenseCheckService: LicenseCheckService,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
   ) {}
 
@@ -81,10 +79,7 @@ export class ShareController {
 
     return {
       ...shareData,
-      features: this.licenseCheckService.resolveFeatures(
-        workspace.licenseKey,
-        workspace.plan,
-      ),
+      features: [],
     };
   }
 
@@ -155,6 +150,10 @@ export class ShareController {
       throw new NotFoundException('Page not found');
     }
 
+    if (page.isBase) {
+      throw new BadRequestException('Bases cannot be publicly shared');
+    }
+
     // User must be able to edit the page to create a share
     //TODO: i dont think this is neccessary if we prevent restricted pages from getting shared
     // rather, use space level permission and workspace/space level sharing restriction
@@ -183,7 +182,7 @@ export class ShareController {
       createShareDto,
     });
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.SHARE_CREATED,
       resourceType: AuditResource.SHARE,
       resourceId: share.id,
@@ -236,7 +235,7 @@ export class ShareController {
 
     await this.shareRepo.deleteShare(share.id);
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.SHARE_DELETED,
       resourceType: AuditResource.SHARE,
       resourceId: share.id,
@@ -272,10 +271,7 @@ export class ShareController {
 
     return {
       ...treeData,
-      features: this.licenseCheckService.resolveFeatures(
-        workspace.licenseKey,
-        workspace.plan,
-      ),
+      features: [],
     };
   }
 }

@@ -245,16 +245,21 @@ export class SpaceRepo {
       .as('isPublished');
   }
 
-  async deleteSpace(spaceId: string, workspaceId: string): Promise<void> {
-    await this.db
+  async deleteSpace(
+    spaceId: string,
+    workspaceId: string,
+    trx?: KyselyTransaction,
+  ): Promise<void> {
+    await dbOrTx(this.db, trx)
       .deleteFrom('spaces')
       .where('id', '=', spaceId)
       .where('workspaceId', '=', workspaceId)
       .execute();
 
-    this.eventEmitter.emit(EventName.SPACE_DELETED, {
-      spaceId,
-      workspaceId,
-    });
+    if (!trx) this.emitDeleted(spaceId, workspaceId);
+  }
+
+  emitDeleted(spaceId: string, workspaceId: string): void {
+    this.eventEmitter.emit(EventName.SPACE_DELETED, { spaceId, workspaceId });
   }
 }

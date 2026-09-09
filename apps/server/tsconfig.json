@@ -20,14 +20,11 @@
     "strict": true,
     "jsx": "react",
     "paths": {
-      "@docmost/db/*": ["./src/database/*"],
-      "@docmost/transactional/*": ["./src/integrations/transactional/*"],
-      "@docmost/ee/*": ["./src/ee/*"],
-      "@docmost/base-formula/server": [
-        "../../packages/base-formula/dist/index.server.d.ts"
+      "@docmost/db/*": [
+        "./src/database/*"
       ],
-      "@docmost/base-formula/client": [
-        "../../packages/base-formula/dist/index.client.d.ts"
+      "@docmost/transactional/*": [
+        "./src/integrations/transactional/*"
       ]
     }
   }

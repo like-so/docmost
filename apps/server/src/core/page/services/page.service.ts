@@ -144,6 +144,7 @@ export class PageService {
       workspaceId: workspaceId,
       lastUpdatedById: userId,
       isBase,
+      baseSchemaVersion: isBase ? 1 : undefined,
       content,
       textContent,
       ydoc,
@@ -396,7 +397,7 @@ export class PageService {
   }
 
   async movePageToSpace(rootPage: Page, spaceId: string, userId: string) {
-    return executeTx(this.db, async (trx) => {
+    const result = await executeTx(this.db, async (trx) => {
       await this.pageRepo.lockPageHierarchySpaces(
         [rootPage.spaceId, spaceId],
         trx,
@@ -514,25 +515,34 @@ export class PageService {
           },
         );
 
-        await this.aiQueue.add(
-          QueueJob.PAGE_MOVED_TO_SPACE,
-          {
-            pageIds: pageIdsToMove,
-            spaceId,
-            workspaceId: currentRootPage.workspaceId,
-          },
-          {
-            attempts: 2,
-            backoff: {
-              type: 'fixed',
-              delay: 2 * 60 * 1000,
-            },
-          },
-        );
+        return {
+          childPageIds,
+          pageIds: pageIdsToMove,
+          workspaceId: currentRootPage.workspaceId,
+        };
       }
 
-      return { childPageIds };
+      return {
+        childPageIds,
+        pageIds: [],
+        workspaceId: currentRootPage.workspaceId,
+      };
     });
+    if (result.pageIds.length) {
+      await this.aiQueue.add(
+        QueueJob.PAGE_MOVED_TO_SPACE,
+        {
+          pageIds: result.pageIds,
+          spaceId,
+          workspaceId: result.workspaceId,
+        },
+        {
+          attempts: 2,
+          backoff: { type: 'fixed', delay: 2 * 60 * 1000 },
+        },
+      );
+    }
+    return { childPageIds: result.childPageIds };
   }
 
   async duplicatePage(
