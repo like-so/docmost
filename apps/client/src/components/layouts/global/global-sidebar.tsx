@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ScrollArea, Text, Divider, Modal, UnstyledButton, Tooltip } from "@mantine/core";
+import { ScrollArea, Text, Divider, Modal, UnstyledButton } from "@mantine/core";
 import {
   IconHome,
   IconClock,
@@ -63,25 +63,7 @@ export default function GlobalSidebar() {
     <div className={classes.navbar}>
       <ScrollArea w="100%" style={{ flex: 1 }}>
         <div className={classes.section}>
-          {mainNavItems.map((item) =>
-            false ? (
-              <Tooltip
-                key={item.label}
-                label="Unavailable"
-                position="right"
-                withArrow
-              >
-                <UnstyledButton
-                  className={classes.link}
-                  data-disabled
-                  aria-disabled="true"
-                  tabIndex={-1}
-                >
-                  <item.icon className={classes.linkIcon} stroke={2} />
-                  <span>{t(item.label)}</span>
-                </UnstyledButton>
-              </Tooltip>
-            ) : (
+          {mainNavItems.map((item) => (
               <Link
                 key={item.label}
                 className={classes.link}
@@ -93,8 +75,7 @@ export default function GlobalSidebar() {
                 <item.icon className={classes.linkIcon} stroke={2} />
                 <span>{t(item.label)}</span>
               </Link>
-            ),
-          )}
+          ))}
         </div>
 
         <Divider my="xs" />

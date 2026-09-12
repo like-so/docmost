@@ -24,6 +24,10 @@ export function WorkspaceInviteForm({ onClose }: Props) {
       return regex.test(email);
     });
 
+    if (validEmails.length === 0) {
+      return;
+    }
+
     await createInvitationMutation.mutateAsync({
       role: role.toLowerCase(),
       emails: validEmails,

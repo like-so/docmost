@@ -2,7 +2,10 @@ import { ScimController } from './scim.controller';
 
 describe('ScimController groups', () => {
   const resources = {
+    listUsers: jest.fn(),
     listGroups: jest.fn(),
+    patchUser: jest.fn(),
+    patchGroup: jest.fn(),
     replaceGroup: jest.fn(),
   };
   const controller = new ScimController(resources as any);
@@ -27,6 +30,19 @@ describe('ScimController groups', () => {
       100,
       'displayName eq "Engineering"',
     );
+  });
+
+  it('forwards an explicit zero count without replacing it with the default', () => {
+    controller.users({ scimWorkspaceId: 'workspace-a' }, '1', '0');
+    controller.groups({ scimWorkspaceId: 'workspace-a' }, '1', '0');
+
+    expect(resources.listUsers).toHaveBeenCalledWith(
+      'workspace-a',
+      1,
+      0,
+      undefined,
+    );
+    expect(resources.listGroups).toHaveBeenCalledWith('workspace-a', 1, 0);
   });
 
   it('addresses replacement by internal group ID in the authenticated workspace', () => {

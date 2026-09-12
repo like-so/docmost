@@ -8,7 +8,7 @@ import {
   Title,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   TemplatePicker,
   type Template,
@@ -32,17 +32,18 @@ export default function TemplatesPage() {
   const [description, setDescription] = useState("");
   const [spaceId, setSpaceId] = useState("");
 
-  useEffect(() => {
-    setTitle(selected?.title ?? "");
-    setDescription(selected?.description ?? "");
-  }, [selected]);
+  const selectTemplate = (template?: Template) => {
+    setSelected(template);
+    setTitle(template?.title ?? "");
+    setDescription(template?.description ?? "");
+  };
 
   const refresh = () => client.invalidateQueries({ queryKey: ["templates"] });
   const create = useMutation({
     mutationFn: () =>
       createTemplate({ title, description: description || undefined }),
     onSuccess: (template) => {
-      setSelected(template);
+      selectTemplate(template);
       void refresh();
     },
   });
@@ -78,7 +79,7 @@ export default function TemplatesPage() {
           selectedId={selected?.id}
           templates={templates.data ?? []}
           onSelect={(id) =>
-            setSelected(templates.data?.find((template) => template.id === id))
+            selectTemplate(templates.data?.find((template) => template.id === id))
           }
         />
       </Card>

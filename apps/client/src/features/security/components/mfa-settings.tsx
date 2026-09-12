@@ -22,6 +22,7 @@ import { getPostLoginRedirect } from "@/lib/app-route.ts";
 
 export function MfaSettings({ setupId }: { setupId?: string }) {
   const [setup, setSetup] = useState<MfaSetup>();
+  const [backupCodes, setBackupCodes] = useState<string[]>();
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -46,15 +47,12 @@ export function MfaSettings({ setupId }: { setupId?: string }) {
   async function confirmSetup() {
     setLoading(true);
     try {
-      if (setupId) {
-        await completeMfaLoginSetup(setupId, code);
-        navigate(getPostLoginRedirect());
-        return;
-      }
-      await verifyMfa(code);
+      const enrollment = setupId
+        ? await completeMfaLoginSetup(setupId, setup.attemptId, code)
+        : await verifyMfa(setup.attemptId, code);
+      setBackupCodes(enrollment.backupCodes);
       setSetup(undefined);
       setCode("");
-      notifications.show({ message: "Multi-factor authentication enabled" });
     } catch (error) {
       notifications.show({
         message:
@@ -63,6 +61,12 @@ export function MfaSettings({ setupId }: { setupId?: string }) {
       });
     }
     setLoading(false);
+  }
+
+  function acknowledgeBackupCodes() {
+    setBackupCodes(undefined);
+    if (setupId) navigate(getPostLoginRedirect());
+    else notifications.show({ message: "Multi-factor authentication enabled" });
   }
 
   async function removeMfa() {
@@ -78,6 +82,26 @@ export function MfaSettings({ setupId }: { setupId?: string }) {
       });
     }
     setLoading(false);
+  }
+
+  if (backupCodes) {
+    return (
+      <Stack gap="sm">
+        <Text fw={500}>Save your backup codes</Text>
+        <Alert color="yellow">
+          Store these codes securely. Each code can be used once if your
+          authenticator is unavailable.
+        </Alert>
+        {backupCodes.map((backupCode) => (
+          <Text component="code" key={backupCode}>
+            {backupCode}
+          </Text>
+        ))}
+        <Button onClick={acknowledgeBackupCodes}>
+          I saved these codes
+        </Button>
+      </Stack>
+    );
   }
 
   if (setup) {

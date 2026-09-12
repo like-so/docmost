@@ -109,13 +109,6 @@ export class OAuthService {
         expiresAt: new Date(Date.now() + 300000),
       })
       .execute();
-    await this.audit(
-      AuditEvent.OAUTH_GRANT_REVOKED,
-      user.workspaceId,
-      user.id,
-      AuditResource.OAUTH_CLIENT,
-      client.id,
-    );
     return { transaction, csrf, scope: scopes.join(' ') };
   }
 

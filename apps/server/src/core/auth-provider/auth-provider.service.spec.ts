@@ -25,6 +25,32 @@ describe('AuthProviderService', () => {
     service = new AuthProviderService(repo, encryption, { logWithContext: jest.fn() } as any);
   });
 
+  it("persists the prepared ID and retains configuration and secrets across disable/re-enable", async () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    let stored: any;
+    repo.create.mockImplementation(async (data: any) => (stored = { ...data }));
+    repo.findById.mockImplementation(async (providerId: string, workspace: string) =>
+      providerId === stored.id && workspace === stored.workspaceId ? stored : undefined);
+    repo.update.mockImplementation(async (_id: string, _workspace: string, patch: any) =>
+      (stored = { ...stored, ...patch }));
+    const created = await service.create(workspaceId, user, {
+      preparedId: id, name: "Corporate", type: "oidc", isEnabled: true,
+      oidcIssuer: "https://issuer.example", oidcClientId: "client", oidcClientSecret: "secret",
+      settings: { allowedDomains: "example.com" },
+    });
+    expect(created.id).toBe(id);
+    expect(stored).not.toHaveProperty("preparedId");
+    const original = { ...stored };
+    await service.update(workspaceId, user, id, { isEnabled: false });
+    expect(stored).toEqual({ ...original, isEnabled: false });
+    const enabled = await service.update(workspaceId, user, id, { isEnabled: true });
+    expect(stored).toEqual(original);
+    expect(enabled).not.toHaveProperty("oidcClientSecret");
+    expect(encryption.encrypt).toHaveBeenCalledTimes(1);
+    expect(repo.update).toHaveBeenNthCalledWith(1, id, workspaceId, { isEnabled: false });
+    expect(repo.update).toHaveBeenNthCalledWith(2, id, workspaceId, { isEnabled: true });
+  });
+
   it('encrypts secrets before creating and redacts them in the response', async () => {
     repo.create.mockResolvedValue({
       id: 'provider-id',
@@ -86,12 +112,14 @@ describe('AuthProviderService', () => {
       id: 'provider-id',
       type: 'saml',
       samlCertificate: 'encrypted:certificate',
+      samlEntityId: 'urn:idp',
     });
     repo.findById.mockResolvedValue({
       id: 'provider-id',
       workspaceId,
       type: 'saml',
       samlUrl: 'https://idp.example.com/sso',
+      samlEntityId: 'urn:idp',
       samlCertificate: 'encrypted:certificate',
     });
     repo.update.mockResolvedValue({
@@ -104,6 +132,7 @@ describe('AuthProviderService', () => {
       name: 'SAML',
       type: 'saml',
       samlUrl: 'https://idp.example.com/sso',
+      samlEntityId: 'urn:idp',
       samlCertificate: 'certificate',
     });
     await service.update(workspaceId, user, 'provider-id', { name: 'Renamed' });
@@ -112,11 +141,25 @@ describe('AuthProviderService', () => {
       expect.objectContaining({ samlCertificate: 'encrypted:certificate' }),
     );
     expect((created as any).samlCertificate).toBeUndefined();
+    expect((created as any).samlEntityId).toBe('urn:idp');
     expect(repo.update).toHaveBeenCalledWith(
       'provider-id',
       workspaceId,
       expect.not.objectContaining({ samlCertificate: expect.anything() }),
     );
+  });
+
+  it('requires and persists a non-secret SAML Entity ID', async () => {
+    repo.create.mockResolvedValue({ id: 'provider-id', samlCertificate: 'encrypted:certificate', samlEntityId: 'urn:idp' });
+
+    await expect(service.create(workspaceId, user, {
+      name: 'SAML', type: 'saml', samlUrl: 'https://idp.example.com/sso', samlCertificate: 'certificate',
+    })).rejects.toBeInstanceOf(BadRequestException);
+    const result = await service.create(workspaceId, user, {
+      name: 'SAML', type: 'saml', samlUrl: 'https://idp.example.com/sso', samlEntityId: 'urn:idp', samlCertificate: 'certificate',
+    });
+    expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ workspaceId, samlEntityId: 'urn:idp' }));
+    expect((result as any).samlEntityId).toBe('urn:idp');
   });
 
   it('only exposes enabled provider metadata publicly', async () => {

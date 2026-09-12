@@ -68,10 +68,10 @@ export function escapeLdapFilter(value: string): string {
 }
 
 export function buildLdapFilter(template: string, username: string): string {
-  if (!template.includes('{username}')) {
-    throw new BadRequestException('LDAP filter must contain {username}.');
+  if (!template.includes('{{username}}')) {
+    throw new BadRequestException('LDAP filter must contain {{username}}.');
   }
-  return template.replaceAll('{username}', escapeLdapFilter(username));
+  return template.replaceAll('{{username}}', escapeLdapFilter(username));
 }
 
 function randomValue(bytes = 32): string {

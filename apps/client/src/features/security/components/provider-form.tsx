@@ -14,9 +14,14 @@ import {
   AuthProvider,
   AuthProviderKind,
   ProviderInput,
+  PreparedProvider,
 } from "@/features/security/types/security.types.ts";
 
+import { useTranslation } from "react-i18next";
+import { ProviderConnectionDetails } from "./provider-connection-details";
+
 interface ProviderFormProps {
+  preparedProvider?: PreparedProvider;
   provider?: AuthProvider;
   loading?: boolean;
   onCancel?: () => void;
@@ -29,8 +34,9 @@ const typeOptions = [
   { value: "ldap", label: "LDAP" },
 ];
 
-function getInitialValues(provider?: AuthProvider): ProviderInput {
+function getInitialValues(provider?: AuthProvider, preparedProvider?: PreparedProvider): ProviderInput {
   return {
+    preparedId: provider ? undefined : preparedProvider?.id,
     name: provider?.name ?? "",
     type: provider?.type ?? "oidc",
     isEnabled: provider?.isEnabled ?? true,
@@ -39,6 +45,7 @@ function getInitialValues(provider?: AuthProvider): ProviderInput {
     oidcIssuer: provider?.oidcIssuer ?? undefined,
     oidcClientId: provider?.oidcClientId ?? undefined,
     samlUrl: provider?.samlUrl ?? undefined,
+    samlEntityId: provider?.samlEntityId ?? undefined,
     ldapUrl: provider?.ldapUrl ?? undefined,
     ldapBindDn: provider?.ldapBindDn ?? undefined,
     ldapBaseDn: provider?.ldapBaseDn ?? undefined,
@@ -51,13 +58,19 @@ function getInitialValues(provider?: AuthProvider): ProviderInput {
 
 export function ProviderForm({
   provider,
+  preparedProvider,
   loading,
   onCancel,
   onSave,
 }: ProviderFormProps) {
+  const { t } = useTranslation();
   const form = useForm<ProviderInput>({
-    initialValues: getInitialValues(provider),
+    initialValues: getInitialValues(provider, preparedProvider),
   });
+  const textInputProps = (path: string) => {
+    const props = form.getInputProps(path);
+    return { ...props, value: props.value ?? "" };
+  };
   const type = form.values.type;
   const secretLabel = provider ? "Replace secret (optional)" : "Secret";
 
@@ -67,25 +80,29 @@ export function ProviderForm({
         <TextInput
           label="Provider name"
           required
-          {...form.getInputProps("name")}
+          {...textInputProps("name")}
         />
         <Select
           label="Protocol"
           data={typeOptions}
           disabled={Boolean(provider)}
-          {...form.getInputProps("type")}
+          {...textInputProps("type")}
+        />
+        <ProviderConnectionDetails
+          type={type}
+          connectionInfo={provider?.connectionInfo ?? preparedProvider?.connectionInfo}
         />
         {type === "oidc" && (
           <>
             <TextInput
               label="Issuer URL"
               required
-              {...form.getInputProps("oidcIssuer")}
+              {...textInputProps("oidcIssuer")}
             />
             <TextInput
               label="Client ID"
               required
-              {...form.getInputProps("oidcClientId")}
+              {...textInputProps("oidcClientId")}
             />
             <PasswordInput
               label={secretLabel}
@@ -94,19 +111,24 @@ export function ProviderForm({
               }
               required={!provider}
               autoComplete="new-password"
-              {...form.getInputProps("oidcClientSecret")}
+              {...textInputProps("oidcClientSecret")}
             />
           </>
         )}
         {type === "saml" && (
           <>
             <TextInput
-              label="Identity provider metadata URL"
+              label={t("IdP login URL")}
               required
-              {...form.getInputProps("samlUrl")}
+              {...textInputProps("samlUrl")}
+            />
+            <TextInput
+              label="Expected IdP Entity ID"
+              required
+              {...textInputProps("samlEntityId")}
             />
             <Textarea
-              label={secretLabel}
+              label={provider ? t("Replace certificate (optional)") : t("IdP certificate")}
               placeholder={
                 provider
                   ? "Leave blank to keep configured certificate"
@@ -115,7 +137,7 @@ export function ProviderForm({
               required={!provider}
               autosize
               minRows={3}
-              {...form.getInputProps("samlCertificate")}
+              {...textInputProps("samlCertificate")}
             />
           </>
         )}
@@ -124,12 +146,12 @@ export function ProviderForm({
             <TextInput
               label="Server URL"
               required
-              {...form.getInputProps("ldapUrl")}
+              {...textInputProps("ldapUrl")}
             />
             <TextInput
               label="Bind DN"
               required
-              {...form.getInputProps("ldapBindDn")}
+              {...textInputProps("ldapBindDn")}
             />
             <PasswordInput
               label={secretLabel}
@@ -138,32 +160,34 @@ export function ProviderForm({
               }
               required={!provider}
               autoComplete="new-password"
-              {...form.getInputProps("ldapBindPassword")}
+              {...textInputProps("ldapBindPassword")}
             />
             <TextInput
               label="Base DN"
               required
-              {...form.getInputProps("ldapBaseDn")}
+              {...textInputProps("ldapBaseDn")}
             />
             <TextInput
               label="User search filter"
+              description="Use {{username}} exactly; its value is escaped before LDAP search."
+              placeholder="(uid={{username}})"
               required
-              {...form.getInputProps("ldapUserSearchFilter")}
+              {...textInputProps("ldapUserSearchFilter")}
             />
             <TextInput
               label="Email attribute"
               description="LDAP attribute containing the user's email address."
-              {...form.getInputProps("ldapUserAttributes.email")}
+              {...textInputProps("ldapUserAttributes.email")}
             />
             <TextInput
               label="Name attribute"
               description="LDAP attribute containing the user's display name."
-              {...form.getInputProps("ldapUserAttributes.name")}
+              {...textInputProps("ldapUserAttributes.name")}
             />
             <TextInput
               label="Verified email attribute"
               description="LDAP attribute that must equal true or 1 before its email can link, update, or sign up."
-              {...form.getInputProps("ldapUserAttributes.emailVerified")}
+              {...textInputProps("ldapUserAttributes.emailVerified")}
             />
             <Checkbox
               label="Use TLS"
@@ -174,7 +198,7 @@ export function ProviderForm({
                 label="CA certificate (optional)"
                 autosize
                 minRows={3}
-                {...form.getInputProps("ldapTlsCaCert")}
+                {...textInputProps("ldapTlsCaCert")}
               />
             )}
           </>
@@ -190,13 +214,13 @@ export function ProviderForm({
         <TextInput
           label="Allowed email domains"
           description="Optional comma or semicolon-separated exact domains allowed to link or sign up. Leave empty to allow all domains."
-          {...form.getInputProps("settings.allowedDomains")}
+          {...textInputProps("settings.allowedDomains")}
         />
         {type === "saml" && (
           <TextInput
             label="Verified email attribute"
             description="SAML assertion attribute that must equal true or 1 before its email can link, update, or sign up."
-            {...form.getInputProps("settings.emailVerifiedAttribute")}
+            {...textInputProps("settings.emailVerifiedAttribute")}
           />
         )}
         <Switch
@@ -207,14 +231,14 @@ export function ProviderForm({
           <TextInput
             label="Group claim"
             description="Identity-provider claim containing a string array of group IDs."
-            {...form.getInputProps("settings.groupClaim")}
+            {...textInputProps("settings.groupClaim")}
           />
         )}
         {form.values.groupSync && type === "ldap" && (
           <TextInput
             label="Group attribute"
             description="LDAP attribute containing a string array of group IDs."
-            {...form.getInputProps("settings.groupAttribute")}
+            {...textInputProps("settings.groupAttribute")}
           />
         )}
         <Group justify="flex-end">

@@ -5,25 +5,28 @@ import { buildLdapFilter, validateIssuer } from './federation.util';
 
 export function buildSamlOptions(
   provider: AuthProvider,
+  entityId: string,
   callbackUrl: string,
-  verifyResponse = true,
+  disableRequestedAuthnContext: boolean,
 ) {
-  if (!provider.samlUrl || (verifyResponse && !provider.samlCertificate)) {
+  if (!provider.samlUrl || !provider.samlCertificate || !provider.samlEntityId) {
     throw new BadRequestException('SAML provider configuration is incomplete.');
   }
   const entryPoint = validateIssuer(provider.samlUrl).toString();
+  const issuer = validateIssuer(entityId).toString();
   const callback = validateIssuer(callbackUrl).toString();
   return {
     entryPoint,
     callbackUrl: callback,
-    issuer: callback,
-    audience: callback,
-    idpCert: verifyResponse ? (provider.samlCertificate ?? '') : '',
+    issuer,
+    audience: issuer,
+    idpCert: provider.samlCertificate,
     wantAssertionsSigned: true,
     wantAuthnResponseSigned: true,
     validateInResponseTo: ValidateInResponseTo.always,
     requestIdExpirationPeriodMs: 10 * 60 * 1000,
     acceptedClockSkewMs: 0,
+    disableRequestedAuthnContext,
   };
 }
 
@@ -39,7 +42,7 @@ export function buildLdapOptions(provider: AuthProvider, username: string) {
     url: url.toString(),
     baseDn: provider.ldapBaseDn,
     filter: buildLdapFilter(
-      provider.ldapUserSearchFilter || '(uid={username})',
+      provider.ldapUserSearchFilter || '(uid={{username}})',
       username,
     ),
     timeout: 10_000,

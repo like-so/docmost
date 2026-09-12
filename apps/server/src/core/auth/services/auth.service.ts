@@ -206,6 +206,11 @@ export class AuthService {
           'SSO account is not eligible for automatic linking.',
         );
       }
+      if (existing && isUserDisabled(existing)) {
+        throw new UnauthorizedException(
+          'SSO account is not eligible for automatic linking.',
+        );
+      }
       if (!existing && !provider.allowSignup) {
         throw new UnauthorizedException('SSO signup is disabled.');
       }
@@ -267,8 +272,17 @@ export class AuthService {
     return provider;
   }
 
-  async completeMfaLogin(challengeId: string, code: string): Promise<string> {
-    const challenge = await this.mfa.verifyChallenge(challengeId, code);
+  async completeMfaLogin(
+    challengeId: string,
+    kind: 'totp' | 'backup',
+    code: string,
+  ): Promise<string> {
+    if (kind !== 'totp' && kind !== 'backup')
+      throw new UnauthorizedException('Invalid MFA challenge');
+    const challenge =
+      kind === 'totp'
+        ? await this.mfa.verifyChallenge(challengeId, code)
+        : await this.mfa.verifyBackupChallenge(challengeId, code);
     const user = await this.userRepo.findById(
       challenge.userId,
       challenge.workspaceId,
@@ -294,6 +308,7 @@ export class AuthService {
       user.email,
       undefined,
       true,
+      setupId,
     );
   }
 
@@ -313,16 +328,27 @@ export class AuthService {
     );
   }
 
-  async completeMfaSetup(setupId: string, code: string): Promise<string> {
-    const challenge = await this.mfa.verifySetupChallenge(setupId, code);
+  async completeMfaSetup(
+    setupId: string,
+    attemptId: string,
+    code: string,
+  ): Promise<{ authToken: string; backupCodes: string[] }> {
+    const setup = await this.mfa.verifySetupChallenge(
+      setupId,
+      attemptId,
+      code,
+    );
     const user = await this.userRepo.findById(
-      challenge.userId,
-      challenge.workspaceId,
+      setup.challenge.userId,
+      setup.challenge.workspaceId,
     );
     if (!user || isUserDisabled(user)) {
       throw new UnauthorizedException('MFA setup user is unavailable');
     }
-    return this.sessionService.createSessionAndToken(user);
+    return {
+      authToken: await this.sessionService.createSessionAndToken(user),
+      backupCodes: setup.backupCodes,
+    };
   }
 
   async setup(createAdminUserDto: CreateAdminUserDto) {

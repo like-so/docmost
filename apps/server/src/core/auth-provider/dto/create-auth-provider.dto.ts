@@ -5,6 +5,7 @@ import {
   IsOptional,
   IsString,
   IsUrl,
+  IsUUID,
   MaxLength,
 } from 'class-validator';
 
@@ -12,6 +13,10 @@ export const AUTH_PROVIDER_TYPES = ['oidc', 'saml', 'ldap'] as const;
 export type AuthProviderType = (typeof AUTH_PROVIDER_TYPES)[number];
 
 export class CreateAuthProviderDto {
+  @IsOptional()
+  @IsUUID()
+  preparedId?: string;
+
   @IsString()
   @MaxLength(100)
   name: string;
@@ -42,6 +47,11 @@ export class CreateAuthProviderDto {
   @IsOptional()
   @IsUrl({ require_tld: false, protocols: ['https'] })
   samlUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1024)
+  samlEntityId?: string;
 
   @IsOptional()
   @IsString()

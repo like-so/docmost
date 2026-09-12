@@ -15,6 +15,11 @@ import { Public } from '../common/decorators/public.decorator';
 import { AuthService } from '../core/auth/services/auth.service';
 import { EnvironmentService } from '../integrations/environment/environment.service';
 import { FastifyReply } from 'fastify';
+import { SkipThrottle, ThrottlerGuard } from '@nestjs/throttler';
+import {
+  ALL_NAMED_THROTTLERS_SKIPPED,
+  AUTH_THROTTLER,
+} from '../integrations/throttle/throttler-names';
 
 @Controller('auth/mfa')
 export class MfaController {
@@ -47,13 +52,13 @@ export class MfaController {
 
   @UseGuards(JwtAuthGuard)
   @Post('verify')
-  @HttpCode(204)
+  @HttpCode(200)
   verify(
-    @Body() body: { code: string },
+    @Body() body: { attemptId: string; code: string },
     @AuthUser() user: User,
     @AuthWorkspace() workspace: Workspace,
   ) {
-    return this.mfa.enable(user.id, workspace.id, body.code);
+    return this.mfa.enable(user.id, workspace.id, body.attemptId, body.code);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -68,12 +73,22 @@ export class MfaController {
   }
 
   @Public()
+  @SkipThrottle({ ...ALL_NAMED_THROTTLERS_SKIPPED, [AUTH_THROTTLER]: false })
+  @UseGuards(ThrottlerGuard)
   @Post('challenge')
   async challenge(
-    @Body() body: { challengeId: string; code: string },
+    @Body() body: {
+      challengeId: string;
+      kind: 'totp' | 'backup';
+      code: string;
+    },
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
-    const token = await this.auth.completeMfaLogin(body.challengeId, body.code);
+    const token = await this.auth.completeMfaLogin(
+      body.challengeId,
+      body.kind,
+      body.code,
+    );
     reply.setCookie('authToken', token, {
       httpOnly: true,
       sameSite: 'lax',
@@ -84,24 +99,33 @@ export class MfaController {
   }
 
   @Public()
+  @SkipThrottle({ ...ALL_NAMED_THROTTLERS_SKIPPED, [AUTH_THROTTLER]: false })
+  @UseGuards(ThrottlerGuard)
   @Post('setup/challenge')
   setupChallenge(@Body() body: { setupId: string }) {
     return this.auth.startMfaSetup(body.setupId);
   }
 
   @Public()
+  @SkipThrottle({ ...ALL_NAMED_THROTTLERS_SKIPPED, [AUTH_THROTTLER]: false })
+  @UseGuards(ThrottlerGuard)
   @Post('setup/challenge/verify')
   async verifySetupChallenge(
-    @Body() body: { setupId: string; code: string },
+    @Body() body: { setupId: string; attemptId: string; code: string },
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
-    const token = await this.auth.completeMfaSetup(body.setupId, body.code);
-    reply.setCookie('authToken', token, {
+    const result = await this.auth.completeMfaSetup(
+      body.setupId,
+      body.attemptId,
+      body.code,
+    );
+    reply.setCookie('authToken', result.authToken, {
       httpOnly: true,
       sameSite: 'lax',
       path: '/',
       expires: this.environment.getCookieExpiresIn(),
       secure: this.environment.isHttps(),
     });
+    return { backupCodes: result.backupCodes };
   }
 }

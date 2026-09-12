@@ -1,11 +1,20 @@
 import api from "@/lib/api-client.ts";
+import { getProviderUrl } from "@/features/security/utils/provider-login.ts";
 import {
   AuthProvider,
+  MfaChallengeKind,
+  MfaEnrollment,
   MfaSetup,
   NewScimToken,
   ProviderInput,
+  PreparedProvider,
   ScimToken,
 } from "@/features/security/types/security.types.ts";
+
+export async function prepareProvider(): Promise<PreparedProvider> {
+  const response = await api.post<PreparedProvider>("/security/providers/prepare");
+  return response.data;
+}
 
 export async function getProviders(): Promise<AuthProvider[]> {
   const response = await api.post<AuthProvider[]>("/security/providers/list");
@@ -84,15 +93,23 @@ export async function beginMfa(
   return response.data;
 }
 
-export async function verifyMfa(code: string): Promise<void> {
-  await api.post("/auth/mfa/verify", { code });
+export async function verifyMfa(
+  attemptId: string,
+  code: string,
+): Promise<MfaEnrollment> {
+  const response = await api.post<MfaEnrollment>("/auth/mfa/verify", {
+    attemptId,
+    code,
+  });
+  return response.data;
 }
 
 export async function completeMfaLogin(
   challengeId: string,
+  kind: MfaChallengeKind,
   code: string,
 ): Promise<void> {
-  await api.post("/auth/mfa/challenge", { challengeId, code });
+  await api.post("/auth/mfa/challenge", { challengeId, kind, code });
 }
 
 export async function beginMfaLoginSetup(setupId: string): Promise<MfaSetup> {
@@ -104,19 +121,24 @@ export async function beginMfaLoginSetup(setupId: string): Promise<MfaSetup> {
 
 export async function completeMfaLoginSetup(
   setupId: string,
+  attemptId: string,
   code: string,
-): Promise<void> {
-  await api.post("/auth/mfa/setup/challenge/verify", { setupId, code });
+): Promise<MfaEnrollment> {
+  const response = await api.post<MfaEnrollment>(
+    "/auth/mfa/setup/challenge/verify",
+    { setupId, attemptId, code },
+  );
+  return response.data;
 }
 
 export async function disableMfa(code: string): Promise<void> {
   await api.post("/auth/mfa/disable", { code });
 }
 
-export async function startProvider(providerId: string): Promise<string> {
-  const response = await api.post<{ url: string }>(
-    `/sso/${encodeURIComponent(providerId)}`,
-  );
+export async function startProvider(
+  provider: Pick<AuthProvider, "id" | "type">,
+): Promise<string> {
+  const response = await api.post<{ url: string }>(getProviderUrl(provider));
   return response.data.url;
 }
 

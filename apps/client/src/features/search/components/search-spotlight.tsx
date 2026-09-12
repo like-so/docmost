@@ -1,7 +1,13 @@
 import { Spotlight } from "@mantine/spotlight";
 import { IconSearch, IconSparkles } from "@tabler/icons-react";
 import { Group, Button, VisuallyHidden, Text } from "@mantine/core";
-import React, { useState, useMemo, useEffect, useCallback } from "react";
+import React, {
+  useState,
+  useMemo,
+  useEffect,
+  useCallback,
+  useRef,
+} from "react";
 import { useDebouncedValue } from "@mantine/hooks";
 import { useTranslation } from "react-i18next";
 import { notifications } from "@mantine/notifications";
@@ -67,12 +73,16 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
   const [aiSearchResult, setAiSearchResult] = useState<any>();
   const [isAiLoading, setAiLoading] = useState(false);
   const [aiSearchError, setAiSearchError] = useState<Error>();
+  const aiRequestId = useRef(0);
 
-  // Clear streaming state and mutation data when query changes (user is typing a new query)
-  useEffect(() => {
+  const handleQueryChange = (nextQuery: string) => {
+    if (nextQuery === query) return;
+    aiRequestId.current += 1;
+    setQuery(nextQuery);
     setAiSearchResult(undefined);
     setAiSearchError(undefined);
-  }, [query]);
+    setAiLoading(false);
+  };
 
   // Show error notification when AI search fails
   useEffect(() => {
@@ -116,11 +126,20 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
 
   const handleAiSearchTrigger = () => {
     if (query.trim() && isAiMode) {
+      const requestId = ++aiRequestId.current;
       setAiLoading(true);
       semanticSearch(query, filters.spaceId || undefined)
-        .then((result) => setAiSearchResult(result))
-        .catch(() => setAiSearchError(new Error("AI search failed")))
-        .finally(() => setAiLoading(false));
+        .then((result) => {
+          if (aiRequestId.current === requestId) setAiSearchResult(result);
+        })
+        .catch(() => {
+          if (aiRequestId.current === requestId) {
+            setAiSearchError(new Error("AI search failed"));
+          }
+        })
+        .finally(() => {
+          if (aiRequestId.current === requestId) setAiLoading(false);
+        });
     }
   };
 
@@ -131,7 +150,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
         maxHeight={600}
         store={searchSpotlightStore}
         query={query}
-        onQueryChange={setQuery}
+        onQueryChange={handleQueryChange}
         scrollable
         overlayProps={{
           backgroundOpacity: 0.55,

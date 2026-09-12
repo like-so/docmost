@@ -3,6 +3,10 @@ jest.mock('./oidc.service', () => ({ OidcService: class OidcService {} }));
 import { SsoController } from './sso.controller';
 
 describe('SsoController callbacks', () => {
+  it("declares real OIDC callback redirects as HTTP 302", () => {
+    expect(Reflect.getMetadata("__httpCode__", SsoController.prototype.callback)).toBe(302);
+  });
+
   const workspace = { id: 'workspace-id', hostname: 'team' } as any;
   let oidc: any;
   let saml: any;
@@ -92,7 +96,7 @@ describe('SsoController callbacks', () => {
     );
 
     expect(reply.clearCookie).toHaveBeenCalledWith('samlBinding', {
-      path: '/api/sso/provider-id/callback',
+      path: '/api/sso/saml/provider-id/callback',
     });
     expect(reply.redirect).toHaveBeenCalledWith(
       'https://workspace.example/login?sso_error=1',

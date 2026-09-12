@@ -38,7 +38,7 @@ describe('LdapService TLS configuration', () => {
       ldapBindDn: 'cn=service',
       ldapBindPassword: 'encrypted:bind-password',
       ldapTlsCaCert: 'encrypted:ca-certificate',
-      ldapUserSearchFilter: '(uid={username})',
+      ldapUserSearchFilter: '(uid={{username}})',
       ldapUserAttributes: {
         email: 'mail',
         name: 'displayName',
@@ -70,7 +70,7 @@ describe('LdapService TLS configuration', () => {
     await service.login('workspace-id', provider.id, 'user', 'password');
 
     expect(encryption.decrypt).toHaveBeenCalledWith('encrypted:ca-certificate');
-    expect(outbound.validate).toHaveBeenCalledWith('ldaps://directory.example', {
+    expect(outbound.validate).toHaveBeenCalledWith('https://directory.example', {
       requireHttps: true,
       privateHostnames: ['directory.internal'],
       allowPrivateNetworks: false,

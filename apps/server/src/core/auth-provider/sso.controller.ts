@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -15,8 +16,12 @@ import { Public } from '../../common/decorators/public.decorator';
 import { Workspace } from '@docmost/db/types/entity.types';
 import { EnvironmentService } from '../../integrations/environment/environment.service';
 import { DomainService } from '../../integrations/environment/domain.service';
-import { buildCallbackUrl, buildWorkspaceUrl } from './callback-url.util';
-import { samlBindingCookie } from './saml-cookie.util';
+import {
+  buildCallbackUrl,
+  buildSamlUrls,
+  buildWorkspaceUrl,
+} from './callback-url.util';
+import { samlBindingCookie, samlBindingPath } from './saml-cookie.util';
 import { SsoCapabilityService } from './sso-capability.service';
 import { OidcService } from './oidc.service';
 import { FastifyReply } from 'fastify';
@@ -47,15 +52,8 @@ export class SsoController {
   ) {
     this.capability.assertEnabled();
     const provider = await this.providers.findEnabled(workspace.id, id);
-    if (provider.type === 'saml') {
-      const { url, binding } = await this.saml.start(
-        workspace.id,
-        id,
-        this.callbackUrl(workspace, id),
-      );
-      reply.setCookie('samlBinding', binding, samlBindingCookie(id));
-      return { url };
-    }
+    if (provider.type !== 'oidc')
+      throw new BadRequestException('Provider is not OIDC.');
     const { url, binding } = await this.oidc.start(
       workspace.id,
       id,
@@ -69,6 +67,25 @@ export class SsoController {
       secure: this.environment.isHttps(),
     });
     return { url: url.toString() };
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Post('saml/:id/login')
+  async startSaml(
+    @Param('id') id: string,
+    @AuthWorkspace() workspace: Workspace,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    this.capability.assertEnabled();
+    const urls = this.samlUrls(workspace, id);
+    const { url, binding } = await this.saml.start(
+      workspace.id,
+      id,
+      urls.entityId,
+      urls.callbackUrl,
+    );
+    reply.setCookie('samlBinding', binding, samlBindingCookie(id));
+    return { url };
   }
 
   @HttpCode(HttpStatus.OK)
@@ -89,6 +106,7 @@ export class SsoController {
     return this.completeLogin(result, reply);
   }
 
+  @HttpCode(HttpStatus.FOUND)
   @Get(':id/callback')
   async callback(
     @Param('id') id: string,
@@ -113,7 +131,8 @@ export class SsoController {
     }
   }
 
-  @Post(':id/callback')
+  @HttpCode(HttpStatus.FOUND)
+  @Post('saml/:id/callback')
   async samlCallback(
     @Param('id') id: string,
     @Body() body: { SAMLResponse?: string; RelayState?: string },
@@ -125,22 +144,24 @@ export class SsoController {
     try {
       if (!body.SAMLResponse) {
         reply.clearCookie('samlBinding', {
-          path: `/api/sso/${id}/callback`,
+          path: samlBindingPath(id),
         });
         return reply.redirect(this.failedLoginUrl(workspace));
       }
+      const urls = this.samlUrls(workspace, id);
       const result = await this.saml.callback(
         workspace.id,
         id,
-        this.callbackUrl(workspace, id),
+        urls.entityId,
+        urls.callbackUrl,
         body.SAMLResponse,
         body.RelayState,
         request.cookies?.samlBinding,
       );
-      reply.clearCookie('samlBinding', { path: `/api/sso/${id}/callback` });
+      reply.clearCookie('samlBinding', { path: samlBindingPath(id) });
       return this.redirectLogin(result, workspace, reply);
     } catch {
-      reply.clearCookie('samlBinding', { path: `/api/sso/${id}/callback` });
+      reply.clearCookie('samlBinding', { path: samlBindingPath(id) });
       return reply.redirect(this.failedLoginUrl(workspace));
     }
   }
@@ -166,6 +187,16 @@ export class SsoController {
 
   private callbackUrl(workspace: Workspace, id: string): string {
     return buildCallbackUrl(
+      this.domain.getUrl(workspace.hostname),
+      this.environment.isCloud(),
+      this.environment.getSubdomainHost(),
+      workspace.hostname,
+      id,
+    );
+  }
+
+  private samlUrls(workspace: Workspace, id: string) {
+    return buildSamlUrls(
       this.domain.getUrl(workspace.hostname),
       this.environment.isCloud(),
       this.environment.getSubdomainHost(),

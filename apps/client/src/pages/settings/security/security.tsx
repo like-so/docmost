@@ -17,11 +17,13 @@ import { notifications } from "@mantine/notifications";
 import { DocumentTitle } from "@/components/ui/document-title.tsx";
 import SettingsTitle from "@/components/settings/settings-title.tsx";
 import { ProviderForm } from "@/features/security/components/provider-form.tsx";
+import { ProviderConnectionDetails } from "@/features/security/components/provider-connection-details";
 import {
   useCreateProvider,
   useCreateScimToken,
   useDeleteProvider,
   useProviders,
+  usePrepareProvider,
   useRevokeScimToken,
   useScimTokens,
   useUpdateProvider,
@@ -31,6 +33,7 @@ import {
   AuthProvider,
   NewScimToken,
   ProviderInput,
+  PreparedProvider,
 } from "@/features/security/types/security.types.ts";
 import { useWorkspaceQuery } from "@/features/workspace/queries/workspace-query.ts";
 import { prepareProviderInput } from "@/features/security/utils/provider-input.ts";
@@ -49,6 +52,8 @@ export default function SecuritySettings() {
   const { data: providers = [] } = useProviders(isAdmin);
   const { data: tokens = [] } = useScimTokens(canManageScim(isOwner));
   const createProvider = useCreateProvider();
+  const prepareProvider = usePrepareProvider();
+  const [preparedProvider, setPreparedProvider] = useState<PreparedProvider>();
   const updateProvider = useUpdateProvider();
   const deleteProvider = useDeleteProvider();
   const updateSecurity = useUpdateSecurity();
@@ -62,6 +67,16 @@ export default function SecuritySettings() {
 
   function reportError(error: unknown) {
     notifications.show({ message: getErrorMessage(error), color: "red" });
+  }
+
+  async function startAdding() {
+    try {
+      const prepared = await prepareProvider.mutateAsync();
+      setPreparedProvider(prepared);
+      setAdding(true);
+    } catch (error) {
+      reportError(error);
+    }
   }
 
   async function saveProvider(data: ProviderInput) {
@@ -183,7 +198,7 @@ export default function SecuritySettings() {
         <Divider />
         <Group justify="space-between">
           <Text fw={600}>Identity providers</Text>
-          <Button onClick={() => setAdding(true)}>Add provider</Button>
+          <Button loading={prepareProvider.isPending} onClick={startAdding}>Add provider</Button>
         </Group>
         {providers.map((provider) => (
           <Card key={provider.id} withBorder>
@@ -200,6 +215,7 @@ export default function SecuritySettings() {
               <Group>
                 <Switch
                   checked={provider.isEnabled}
+                  disabled={updateProvider.isPending}
                   aria-label={`Enable ${provider.name}`}
                   onChange={(event) =>
                     changeProvider(provider, event.currentTarget.checked)
@@ -217,6 +233,7 @@ export default function SecuritySettings() {
                 </Button>
               </Group>
             </Group>
+            <ProviderConnectionDetails type={provider.type} connectionInfo={provider.connectionInfo} />
           </Card>
         ))}
         {providers.length === 0 && (
@@ -296,7 +313,9 @@ export default function SecuritySettings() {
         title={editing ? "Edit identity provider" : "Add identity provider"}
       >
         <ProviderForm
+          key={editing?.id ?? preparedProvider?.id ?? "new"}
           provider={editing}
+          preparedProvider={editing ? undefined : preparedProvider}
           loading={createProvider.isPending || updateProvider.isPending}
           onCancel={() => {
             setAdding(false);

@@ -11,6 +11,7 @@ export class AuthProviderDto {
   oidcIssuer: string | null;
   oidcClientId: string | null;
   samlUrl: string | null;
+  samlEntityId: string | null;
   ldapUrl: string | null;
   ldapBindDn: string | null;
   ldapBaseDn: string | null;

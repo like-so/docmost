@@ -59,4 +59,17 @@ describe("provider input", () => {
     ).not.toHaveProperty("ldapTlsCaCert");
   });
 
+  it("retains the non-secret SAML Entity ID", () => {
+    expect(
+      prepareProviderInput({
+        name: "SAML",
+        type: "saml",
+        isEnabled: true,
+        allowSignup: false,
+        groupSync: false,
+        samlEntityId: "urn:idp",
+      }),
+    ).toMatchObject({ samlEntityId: "urn:idp" });
+  });
+
 });

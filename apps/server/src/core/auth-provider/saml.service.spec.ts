@@ -2,8 +2,11 @@ const mockAuthorize = jest.fn();
 const mockValidate = jest.fn();
 
 jest.mock('@node-saml/passport-saml', () => ({
-  SAML: jest.fn().mockImplementation(() => ({
-    getAuthorizeUrlAsync: mockAuthorize,
+  SAML: jest.fn().mockImplementation((options) => ({
+    getAuthorizeUrlAsync: async (...args: unknown[]) => {
+      await options.cacheProvider.saveAsync('request-id', 'timestamp');
+      return mockAuthorize(...args);
+    },
     validatePostResponseAsync: mockValidate,
   })),
 }));
@@ -16,10 +19,17 @@ const provider = {
   id: 'provider-id',
   type: 'saml',
   samlUrl: 'https://idp.example/sso',
+  samlEntityId: 'https://idp.example',
   samlCertificate: 'encrypted:certificate',
   settings: { emailVerifiedAttribute: 'email_verified' },
   groupSync: false,
 };
+const entityId = 'https://app.example/api/sso/saml/provider-id/login';
+const callbackUrl =
+  'https://app.example/api/sso/saml/provider-id/callback';
+const response = Buffer.from(
+  `<Response Destination="${callbackUrl}" InResponseTo="request-id"><SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><SubjectConfirmationData Recipient="${callbackUrl}" InResponseTo="request-id" /></SubjectConfirmation></Response>`,
+).toString('base64');
 
 describe('SamlService browser binding', () => {
   let redis: { set: jest.Mock; getdel: jest.Mock; get: jest.Mock };
@@ -40,7 +50,10 @@ describe('SamlService browser binding', () => {
     service = new SamlService(
       { findEnabled: jest.fn().mockResolvedValue(provider) } as any,
       auth as any,
-      { getAppSecret: jest.fn().mockReturnValue('test-secret') } as any,
+      {
+        getAppSecret: jest.fn().mockReturnValue('test-secret'),
+        getSamlDisableRequestedAuthnContext: jest.fn().mockReturnValue(false),
+      } as any,
       encryption as any,
       { getOrThrow: jest.fn().mockReturnValue(redis) } as any,
     );
@@ -51,6 +64,9 @@ describe('SamlService browser binding', () => {
         mail: 'person@example.com',
         displayName: 'Person',
         email_verified: true,
+        inResponseTo: 'request-id',
+        getAssertionXml: () =>
+          '<Assertion><Issuer>https://idp.example</Issuer></Assertion>',
       },
     });
   });
@@ -59,7 +75,8 @@ describe('SamlService browser binding', () => {
     return service.start(
       'workspace-id',
       provider.id,
-      'https://app.example/api/sso/provider-id/callback',
+      entityId,
+      callbackUrl,
     );
   }
 
@@ -68,12 +85,18 @@ describe('SamlService browser binding', () => {
       binding: (service as any).hashBinding(binding),
       workspaceId: 'workspace-id',
       providerId: provider.id,
+      requestId: 'request-id',
     });
   }
 
   it('rejects non-HTTPS callback origins before creating a transaction', async () => {
     await expect(
-      service.start('workspace-id', provider.id, 'http://app.example/callback'),
+      service.start(
+        'workspace-id',
+        provider.id,
+        entityId,
+        'http://app.example/callback',
+      ),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(redis.set).not.toHaveBeenCalled();
   });
@@ -81,7 +104,7 @@ describe('SamlService browser binding', () => {
   it('creates an opaque RelayState transaction and accepts its browser binding', async () => {
     const result = await start();
     const relayState = mockAuthorize.mock.calls[0][0];
-    expect(encryption.decrypt).not.toHaveBeenCalled();
+    expect(encryption.decrypt).toHaveBeenCalledWith('encrypted:certificate');
     expect(result).toEqual({
       url: 'https://idp.example/authorize',
       binding: expect.any(String),
@@ -93,14 +116,17 @@ describe('SamlService browser binding', () => {
       600,
       'NX',
     );
-    redis.getdel.mockResolvedValue(transaction(result.binding));
+    redis.getdel
+      .mockResolvedValueOnce(transaction(result.binding))
+      .mockResolvedValueOnce('timestamp');
 
     await expect(
       service.callback(
         'workspace-id',
         provider.id,
-        'https://app.example/api/sso/provider-id/callback',
-        'response',
+        entityId,
+        callbackUrl,
+        response,
         relayState,
         result.binding,
       ),
@@ -126,8 +152,9 @@ describe('SamlService browser binding', () => {
       service.callback(
         'workspace-id',
         provider.id,
+        entityId,
         'https://app.example/callback',
-        'response',
+        response,
         undefined,
         undefined,
       ),
@@ -137,8 +164,9 @@ describe('SamlService browser binding', () => {
       service.callback(
         'workspace-id',
         provider.id,
+        entityId,
         'https://app.example/callback',
-        'response',
+        response,
         'relay',
         'binding',
       ),
@@ -148,19 +176,21 @@ describe('SamlService browser binding', () => {
   it('rejects replayed transactions after atomic consumption', async () => {
     redis.getdel
       .mockResolvedValueOnce(transaction('binding'))
+      .mockResolvedValueOnce('timestamp')
       .mockResolvedValueOnce(null);
     const callback = () =>
       service.callback(
         'workspace-id',
         provider.id,
-        'https://app.example/callback',
-        'response',
+        entityId,
+        callbackUrl,
+        response,
         'relay',
         'binding',
       );
 
     await expect(callback()).resolves.toEqual({ authToken: 'token' });
     await expect(callback()).rejects.toBeInstanceOf(BadRequestException);
-    expect(redis.getdel).toHaveBeenCalledTimes(2);
+    expect(redis.getdel).toHaveBeenCalledTimes(3);
   });
 });

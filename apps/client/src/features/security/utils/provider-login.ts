@@ -4,8 +4,11 @@ export function getVisibleProviders(providers: AuthProvider[]): AuthProvider[] {
   return providers.filter((provider) => provider.isEnabled);
 }
 
-export function getProviderUrl(provider: Pick<AuthProvider, "id">): string {
-  return `/sso/${encodeURIComponent(provider.id)}`;
+export function getProviderUrl(
+  provider: Pick<AuthProvider, "id" | "type">,
+): string {
+  const id = encodeURIComponent(provider.id);
+  return provider.type === "saml" ? `/sso/saml/${id}/login` : `/sso/${id}`;
 }
 
 export function getLoginError(search: URLSearchParams): string | undefined {

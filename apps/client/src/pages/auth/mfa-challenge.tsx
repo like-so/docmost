@@ -1,14 +1,23 @@
 import { useState } from "react";
-import { Box, Button, Container, PasswordInput, Title } from "@mantine/core";
+import {
+  Box,
+  Button,
+  Container,
+  Group,
+  PasswordInput,
+  Title,
+} from "@mantine/core";
 import { useLocation, useNavigate } from "react-router-dom";
 import { notifications } from "@mantine/notifications";
 import { AuthLayout } from "@/features/auth/components/auth-layout.tsx";
 import classes from "@/features/auth/components/auth.module.css";
 import { completeMfaLogin } from "@/features/security/services/security-service.ts";
+import { MfaChallengeKind } from "@/features/security/types/security.types.ts";
 import { getPostLoginRedirect } from "@/lib/app-route.ts";
 
 export default function MfaChallengePage() {
   const [code, setCode] = useState("");
+  const [kind, setKind] = useState<MfaChallengeKind>("totp");
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const { state } = useLocation();
@@ -20,7 +29,7 @@ export default function MfaChallengePage() {
     setLoading(true);
     try {
       if (!challengeId) throw new Error("MFA sign-in challenge is missing");
-      await completeMfaLogin(challengeId, code);
+      await completeMfaLogin(challengeId, kind, code);
       navigate(getPostLoginRedirect());
     } catch (error) {
       notifications.show({
@@ -39,8 +48,22 @@ export default function MfaChallengePage() {
           <Title order={1} size="h2" ta="center" fw={500} mb="md">
             Verify your sign-in
           </Title>
+          <Group mt="md">
+            <Button
+              variant={kind === "totp" ? "filled" : "light"}
+              onClick={() => setKind("totp")}
+            >
+              Authenticator
+            </Button>
+            <Button
+              variant={kind === "backup" ? "filled" : "light"}
+              onClick={() => setKind("backup")}
+            >
+              Backup code
+            </Button>
+          </Group>
           <PasswordInput
-            label="Authenticator code"
+            label={kind === "totp" ? "Authenticator code" : "Backup code"}
             value={code}
             onChange={(event) => setCode(event.currentTarget.value)}
           />

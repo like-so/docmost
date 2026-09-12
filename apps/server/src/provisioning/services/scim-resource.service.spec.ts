@@ -349,6 +349,127 @@ describe('ScimResourceService group responses', () => {
       members: [{ value: 'scim-keep' }],
     }));
   });
+
+  it('clears all SCIM-owned members for remove members without a value', async () => {
+    const execute = jest.fn().mockResolvedValue([
+      { id: 'scim-one', scimExternalId: 'external-one' },
+    ]);
+    const db = { selectFrom: jest.fn(() => ({ innerJoin: () => ({ select: () => ({ where: () => ({ where: () => ({ where: () => ({ execute }) }) }) }) }) })) };
+    const scoped = new ScimResourceService(db as any, groups as any);
+    jest.spyOn(scoped as any, 'getGroup').mockResolvedValue({ id: 'group-id', externalId: 'eng', displayName: 'Engineering' });
+    const replace = jest.spyOn(scoped as any, 'replaceGroup').mockResolvedValue({ id: 'group-id' });
+
+    await scoped.patchGroup('workspace-id', 'group-id', [{ op: 'remove', path: 'members' }]);
+
+    expect(replace).toHaveBeenCalledWith('workspace-id', 'group-id', expect.objectContaining({
+      members: [],
+    }));
+  });
+
+  it('rejects unsupported group patch operations', async () => {
+    await expect(
+      service.patchGroup('workspace-id', 'group-id', [
+        { op: 'replace', path: 'unknown', value: 'value' },
+      ]),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('ScimResourceService user patching', () => {
+  const service = new ScimResourceService({} as any, {} as any);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('merges a pathless replace into supported user fields', async () => {
+    jest.spyOn(service, 'getUser').mockResolvedValue({
+      userName: 'before@example.com',
+      externalId: 'before-id',
+      active: true,
+      name: { formatted: 'Before' },
+    } as any);
+    const replace = jest.spyOn(service, 'replaceUser').mockResolvedValue({} as any);
+
+    await service.patchUser('workspace-id', 'user-id', [
+      {
+        op: 'replace',
+        value: { active: false, name: { formatted: 'After' } },
+      },
+    ]);
+
+    expect(replace).toHaveBeenCalledWith('workspace-id', 'user-id', {
+      userName: 'before@example.com',
+      externalId: 'before-id',
+      active: false,
+      name: { formatted: 'After' },
+    });
+  });
+
+  it('rejects unsupported user patch operations', async () => {
+    jest.spyOn(service, 'getUser').mockResolvedValue({
+      userName: 'person@example.com',
+    } as any);
+
+    await expect(
+      service.patchUser('workspace-id', 'user-id', [
+        { op: 'add', path: 'userName', value: 'person@example.com' },
+      ]),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('ScimResourceService pagination', () => {
+  const service = new ScimResourceService({} as any, {} as any);
+
+  it('normalizes effective pagination and reports returned rows', () => {
+    expect((service as any).pagination(NaN, 0)).toEqual({
+      startIndex: 1,
+      count: 0,
+    });
+    expect((service as any).pagination(2.5, Infinity)).toEqual({
+      startIndex: 1,
+      count: 100,
+    });
+    expect((service as any).list('User', [], 4, 1, 0)).toMatchObject({
+      startIndex: 1,
+      itemsPerPage: 0,
+    });
+  });
+
+  it('orders user pages by ID and permits an explicit zero limit', async () => {
+    const execute = jest.fn().mockResolvedValue([]);
+    const count = { executeTakeFirstOrThrow: jest.fn().mockResolvedValue({ count: 4 }) };
+    const query = {
+      select: jest.fn(function () {
+        return this;
+      }),
+      where: jest.fn(function () {
+        return this;
+      }),
+      orderBy: jest.fn(function () {
+        return this;
+      }),
+      limit: jest.fn(function () {
+        return this;
+      }),
+      offset: jest.fn(function () {
+        return this;
+      }),
+      execute,
+      clearSelect: jest.fn(() => ({ select: jest.fn(() => count) })),
+    };
+    const paged = new ScimResourceService(
+      { selectFrom: jest.fn(() => query) } as any,
+      {} as any,
+    );
+
+    await expect(paged.listUsers('workspace-id', 0, 0)).resolves.toMatchObject({
+      startIndex: 1,
+      itemsPerPage: 0,
+    });
+
+    expect(query.orderBy).toHaveBeenCalledWith('id asc');
+    expect(query.limit).toHaveBeenCalledWith(0);
+  });
 });
 
 describe('ScimResourceService documented user filters', () => {

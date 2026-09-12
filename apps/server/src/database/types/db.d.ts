@@ -114,6 +114,7 @@ export interface AuthProviders {
   oidcClientSecret: string | null;
   oidcIssuer: string | null;
   samlCertificate: string | null;
+  samlEntityId: string | null;
   samlUrl: string | null;
   type: string;
   updatedAt: Generated<Timestamp>;

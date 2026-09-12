@@ -5,6 +5,7 @@ import {
   deleteProvider,
   getEnabledProviders,
   getProviders,
+  prepareProvider,
   getScimTokens,
   revokeScimToken,
   updateProvider,
@@ -28,6 +29,10 @@ export function useProviders(enabled = true) {
 
 export function useScimTokens(enabled = true) {
   return useQuery({ queryKey: scimKey, queryFn: getScimTokens, enabled });
+}
+
+export function usePrepareProvider() {
+  return useMutation({ mutationFn: prepareProvider });
 }
 
 export function useCreateProvider() {

@@ -21,6 +21,10 @@ import { AuthProviderService } from './auth-provider.service';
 import { CreateAuthProviderDto } from './dto/create-auth-provider.dto';
 import { UpdateAuthProviderDto } from './dto/update-auth-provider.dto';
 import { SsoCapabilityService } from './sso-capability.service';
+import { randomUUID } from 'node:crypto';
+import { DomainService } from '../../integrations/environment/domain.service';
+import { EnvironmentService } from '../../integrations/environment/environment.service';
+import { buildCallbackUrl, buildSamlUrls } from './callback-url.util';
 
 @Controller('security/providers')
 export class AuthProviderController {
@@ -28,7 +32,19 @@ export class AuthProviderController {
     private readonly providerService: AuthProviderService,
     private readonly workspaceAbility: WorkspaceAbilityFactory,
     private readonly capability: SsoCapabilityService,
+    private readonly domain: DomainService,
+    private readonly environment: EnvironmentService,
   ) {}
+
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post('prepare')
+  prepare(@AuthUser() user: User, @AuthWorkspace() workspace: Workspace) {
+    this.capability.assertEnabled();
+    this.requireSettingsAccess(user, workspace);
+    const id = randomUUID();
+    return { id, connectionInfo: this.connectionInfo(workspace, id) };
+  }
 
   @Public()
   @HttpCode(HttpStatus.OK)
@@ -41,29 +57,33 @@ export class AuthProviderController {
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post('list')
-  list(@AuthUser() user: User, @AuthWorkspace() workspace: Workspace) {
+  async list(@AuthUser() user: User, @AuthWorkspace() workspace: Workspace) {
     this.capability.assertEnabled();
     this.requireSettingsAccess(user, workspace);
-    return this.providerService.list(workspace.id);
+    return (await this.providerService.list(workspace.id)).map((provider) => ({
+      ...provider,
+      connectionInfo: this.connectionInfo(workspace, provider.id),
+    }));
   }
 
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post('create')
-  create(
+  async create(
     @Body() dto: CreateAuthProviderDto,
     @AuthUser() user: User,
     @AuthWorkspace() workspace: Workspace,
   ) {
     this.capability.assertEnabled();
     this.requireSettingsAccess(user, workspace);
-    return this.providerService.create(workspace.id, user, dto);
+    const provider = await this.providerService.create(workspace.id, user, dto);
+    return { ...provider, connectionInfo: this.connectionInfo(workspace, provider.id) };
   }
 
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post('update')
-  update(
+  async update(
     @Body() dto: UpdateAuthProviderDto,
     @AuthUser() user: User,
     @AuthWorkspace() workspace: Workspace,
@@ -71,7 +91,8 @@ export class AuthProviderController {
     this.capability.assertEnabled();
     this.requireSettingsAccess(user, workspace);
     const { id, ...update } = dto;
-    return this.providerService.update(workspace.id, user, id, update);
+    const provider = await this.providerService.update(workspace.id, user, id, update);
+    return { ...provider, connectionInfo: this.connectionInfo(workspace, provider.id) };
   }
 
   @UseGuards(JwtAuthGuard)
@@ -85,6 +106,18 @@ export class AuthProviderController {
     this.capability.assertEnabled();
     this.requireSettingsAccess(user, workspace);
     await this.providerService.remove(workspace.id, user, dto.id);
+  }
+
+  private connectionInfo(workspace: Workspace, providerId: string) {
+    const appUrl = this.domain.getUrl(workspace.hostname);
+    const cloud = this.environment.isCloud();
+    const subdomainHost = this.environment.getSubdomainHost();
+    const saml = buildSamlUrls(appUrl, cloud, subdomainHost, workspace.hostname, providerId);
+    return {
+      oidcCallbackUrl: buildCallbackUrl(appUrl, cloud, subdomainHost, workspace.hostname, providerId),
+      samlEntityId: saml.entityId,
+      samlAcsUrl: saml.callbackUrl,
+    };
   }
 
   private requireSettingsAccess(user: User, workspace: Workspace) {

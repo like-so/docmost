@@ -40,8 +40,11 @@ describe('federation security utilities', () => {
   });
 
   it('escapes LDAP filter assertion values', () => {
-    expect(buildLdapFilter('(uid={username})', 'a*)(b\\c')).toBe(
+    expect(buildLdapFilter('(uid={{username}})', 'a*)(b\\c')).toBe(
       '(uid=a\\2a\\29\\28b\\5cc)',
+    );
+    expect(() => buildLdapFilter('(uid={username})', 'person')).toThrow(
+      'LDAP filter must contain {{username}}.',
     );
   });
 });

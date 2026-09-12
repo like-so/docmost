@@ -95,8 +95,8 @@ export class LdapService {
 
   private asHttpsUrl(ldapUrl: string): string {
     const url = new URL(ldapUrl);
-    url.protocol = 'https:';
-    return url.toString();
+    // URL protocol assignment cannot switch LDAPS to a special HTTPS scheme.
+    return `https:${url.href.slice(url.protocol.length)}`;
   }
 
   private ldapPort(ldapUrl: string): number {

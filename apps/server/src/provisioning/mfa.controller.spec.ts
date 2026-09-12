@@ -39,11 +39,15 @@ describe('MfaController', () => {
     const controller = new MfaController(mfa, auth, environment);
 
     await controller.challenge(
-      { challengeId: 'pending-id', code: '123456' },
+      { challengeId: 'pending-id', kind: 'totp', code: '123456' },
       reply,
     );
 
-    expect(auth.completeMfaLogin).toHaveBeenCalledWith('pending-id', '123456');
+    expect(auth.completeMfaLogin).toHaveBeenCalledWith(
+      'pending-id',
+      'totp',
+      '123456',
+    );
     expect(reply.setCookie).toHaveBeenCalledWith(
       'authToken',
       'session-token',

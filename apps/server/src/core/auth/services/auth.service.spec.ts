@@ -20,6 +20,8 @@ describe('AuthService federated identity resolution', () => {
   let signup: any;
   let session: any;
   let groups: any;
+  let mfaGate: any;
+  let database: any;
 
   beforeEach(() => {
     provider = {
@@ -32,6 +34,8 @@ describe('AuthService federated identity resolution', () => {
     signup = { signup: jest.fn() };
     session = { createSessionAndToken: jest.fn().mockResolvedValue('token') };
     groups = { syncUserGroups: jest.fn() };
+    mfaGate = { requiresChallenge: jest.fn().mockResolvedValue(false) };
+    database = createDatabase();
     service = new AuthService(
       signup,
       {} as any,
@@ -43,10 +47,10 @@ describe('AuthService federated identity resolution', () => {
       {} as any,
       {} as any,
       {} as any,
-      { requiresChallenge: jest.fn().mockResolvedValue(false) } as any,
+      mfaGate,
       {} as any,
       groups,
-      createDatabase(),
+      database,
       {} as any,
     );
   });
@@ -170,6 +174,27 @@ describe('AuthService federated identity resolution', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
+  it.each(['deactivatedAt', 'deletedAt'] as const)(
+    'rejects a matching-email user with %s before linking or login side effects',
+    async (status) => {
+      userRepo.findByEmail.mockResolvedValue({ ...user, [status]: new Date() });
+
+      await expect(
+        service.loginFederated(
+          providerId,
+          { ...identity, groups: ['Engineering'] },
+          workspaceId,
+        ),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      expect(database.insertAuthAccount).not.toHaveBeenCalled();
+      expect(userRepo.updateUser).not.toHaveBeenCalled();
+      expect(groups.syncUserGroups).not.toHaveBeenCalled();
+      expect(mfaGate.requiresChallenge).not.toHaveBeenCalled();
+      expect(session.createSessionAndToken).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects a subject collision rather than taking over its linked account', async () => {
     userRepo.findByEmail.mockResolvedValue(user);
     inserted = undefined;
@@ -180,12 +205,14 @@ describe('AuthService federated identity resolution', () => {
   });
 
   function createDatabase(): any {
-    const transaction = { insertInto: jest.fn(() => insertQuery()) };
+    const insertAuthAccount = jest.fn(() => insertQuery());
+    const transaction = { insertInto: insertAuthAccount };
     return {
       selectFrom: jest.fn((table) => selectQuery(table)),
       transaction: jest.fn(() => ({
         execute: (callback) => callback(transaction),
       })),
+      insertAuthAccount,
     };
   }
 

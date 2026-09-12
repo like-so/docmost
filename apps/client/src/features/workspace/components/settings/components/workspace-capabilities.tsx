@@ -54,7 +54,7 @@ export function WorkspaceCapability({ setting, title, description }: Props) {
         <Text size="md">{title}</Text>
         <Text size="sm" c="dimmed">{description}</Text>
       </div>
-      <Switch checked={value} onChange={(event) => change(event.currentTarget.checked)} />
+      <Switch aria-label={title} checked={value} onChange={(event) => change(event.currentTarget.checked)} />
     </Group>
   );
 }

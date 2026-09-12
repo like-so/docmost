@@ -33,6 +33,26 @@ export function buildWorkspaceUrl(
   return new URL(appUrl).origin;
 }
 
+export function buildSamlUrls(
+  appUrl: string,
+  isCloud: boolean,
+  subdomainHost: string | undefined,
+  workspaceHostname: string,
+  providerId: string,
+): { entityId: string; callbackUrl: string } {
+  const origin = buildWorkspaceUrl(
+    appUrl,
+    isCloud,
+    subdomainHost,
+    workspaceHostname,
+  );
+  const id = encodeURIComponent(providerId);
+  return {
+    entityId: `${origin}/api/sso/saml/${id}/login`,
+    callbackUrl: `${origin}/api/sso/saml/${id}/callback`,
+  };
+}
+
 function validateHostname(hostname: string): string {
   if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(hostname)) {
     throw new BadRequestException('Workspace hostname is invalid.');

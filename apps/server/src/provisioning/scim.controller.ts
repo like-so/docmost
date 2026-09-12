@@ -15,6 +15,7 @@ import {
 import { ScimBearerGuard } from './guards/scim-bearer.guard';
 import {
   ScimGroup,
+  ScimPatchOperation,
   ScimResourceService,
   ScimUser,
 } from './services/scim-resource.service';
@@ -65,8 +66,8 @@ export class ScimController {
   ) {
     return this.resources.listUsers(
       req.scimWorkspaceId,
-      Number(start) || 1,
-      Number(count) || 100,
+      Number(start),
+      Number(count),
       filter,
     );
   }
@@ -83,24 +84,17 @@ export class ScimController {
   ) {
     return this.resources.replaceUser(req.scimWorkspaceId, id, input);
   }
-  @Patch('Users/:id') async patchUser(
+  @Patch('Users/:id') patchUser(
     @Req() req: any,
     @Param('id') id: string,
     @Body()
-    patch: { Operations: Array<{ op: string; path: string; value: unknown }> },
+    patch: { Operations?: ScimPatchOperation[] },
   ) {
-    const current = await this.resources.getUser(req.scimWorkspaceId, id);
-    const values = Object.fromEntries(
-      (patch.Operations ?? [])
-        .filter((op) => op.op.toLowerCase() === 'replace')
-        .map((op) => [op.path, op.value]),
+    return this.resources.patchUser(
+      req.scimWorkspaceId,
+      id,
+      patch.Operations ?? [],
     );
-    return this.resources.replaceUser(req.scimWorkspaceId, id, {
-      userName: (values.userName as string) ?? current.userName,
-      externalId: (values.externalId as string) ?? current.externalId,
-      active: (values.active as boolean) ?? current.active,
-      name: (values.name as ScimUser['name']) ?? current.name,
-    });
   }
   @Delete('Users/:id') @HttpCode(204) deleteUser(
     @Req() req: any,
@@ -115,8 +109,8 @@ export class ScimController {
     @Query('filter') filter?: string,
   ) {
     const workspaceId = req.scimWorkspaceId;
-    const startIndex = Number(start) || 1;
-    const pageSize = Number(count) || 100;
+    const startIndex = Number(start);
+    const pageSize = Number(count);
     return filter
       ? this.resources.listGroups(workspaceId, startIndex, pageSize, filter)
       : this.resources.listGroups(workspaceId, startIndex, pageSize);
@@ -138,9 +132,7 @@ export class ScimController {
     @Req() req: any,
     @Param('id') id: string,
     @Body()
-    patch: {
-      Operations: Array<{ op: string; path?: string; value?: unknown }>;
-    },
+    patch: { Operations?: ScimPatchOperation[] },
   ) {
     return this.resources.patchGroup(
       req.scimWorkspaceId,

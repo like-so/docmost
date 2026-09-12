@@ -70,7 +70,7 @@ function SecurityToggle({
   return (
     <Group justify="space-between">
       <Text>{label}</Text>
-      <Switch checked={checked} onChange={(event) => change(event.currentTarget.checked)} />
+      <Switch aria-label={label} checked={checked} onChange={(event) => change(event.currentTarget.checked)} />
     </Group>
   );
 }

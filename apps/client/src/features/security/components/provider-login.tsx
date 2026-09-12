@@ -34,7 +34,7 @@ export function ProviderLogin() {
     setLoadingId(provider.id);
     setRequestError(false);
     try {
-      const redirect = getRedirectUrl(await startProvider(provider.id));
+      const redirect = getRedirectUrl(await startProvider(provider));
       if (!redirect) throw new Error("Invalid provider authorization URL");
       window.location.assign(redirect);
     } catch {

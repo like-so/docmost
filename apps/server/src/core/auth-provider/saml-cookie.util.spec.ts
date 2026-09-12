@@ -5,7 +5,7 @@ describe('SAML binding cookie', () => {
     expect(samlBindingCookie('provider id')).toEqual({
       httpOnly: true,
       sameSite: 'none',
-      path: '/api/sso/provider id/callback',
+      path: '/api/sso/saml/provider%20id/callback',
       maxAge: 600,
       secure: true,
     });

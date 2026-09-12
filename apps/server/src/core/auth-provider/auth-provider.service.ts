@@ -37,8 +37,10 @@ export class AuthProviderService {
     dto: CreateAuthProviderDto,
   ) {
     this.validate(dto);
+    const { preparedId, ...configuration } = dto;
     const provider = await this.repo.create({
-      ...this.encryptSecrets(this.normalizeSettings(dto)),
+      ...this.encryptSecrets(this.normalizeSettings(configuration)),
+      ...(preparedId ? { id: preparedId } : {}),
       workspaceId,
       creatorId: user.id,
     });
@@ -128,8 +130,13 @@ export class AuthProviderService {
     if (dto.type === 'oidc' && (!dto.oidcIssuer || !dto.oidcClientId)) {
       throw new BadRequestException('OIDC issuer and client ID are required.');
     }
-    if (dto.type === 'saml' && (!dto.samlUrl || !dto.samlCertificate)) {
-      throw new BadRequestException('SAML URL and certificate are required.');
+    if (
+      dto.type === 'saml' &&
+      (!dto.samlUrl || !dto.samlCertificate || !dto.samlEntityId)
+    ) {
+      throw new BadRequestException(
+        'SAML URL, Entity ID, and certificate are required.',
+      );
     }
     if (dto.type === 'ldap' && (!dto.ldapUrl || !dto.ldapBaseDn)) {
       throw new BadRequestException('LDAP URL and base DN are required.');

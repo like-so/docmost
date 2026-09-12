@@ -70,7 +70,14 @@ export default function ApiKeyManagement() {
   const refresh = async () => setKeys(await listWorkspaceApiKeys());
 
   useEffect(() => {
-    if (isAdmin) void refresh();
+    if (!isAdmin) return;
+    let cancelled = false;
+    listWorkspaceApiKeys().then((result) => {
+      if (!cancelled) setKeys(result);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [isAdmin]);
 
   if (!isAdmin)

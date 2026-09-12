@@ -68,7 +68,13 @@ export default function ApiKeys() {
   const refresh = async () => setKeys(await listApiKeys());
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    listApiKeys().then((result) => {
+      if (!cancelled) setKeys(result);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function create() {

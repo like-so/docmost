@@ -7,17 +7,34 @@ describe('federation protocol configurations', () => {
     const config = buildSamlOptions(
       {
         samlUrl: 'https://idp.example.com/sso',
+        samlEntityId: 'https://idp.example.com/entity',
         samlCertificate: 'certificate',
       } as any,
-      'https://docmost.example.com/api/sso/provider/callback',
+      'https://docmost.example.com/api/sso/saml/provider/login',
+      'https://docmost.example.com/api/sso/saml/provider/callback',
+      false,
     );
     expect(config).toMatchObject({
       wantAssertionsSigned: true,
       wantAuthnResponseSigned: true,
       validateInResponseTo: ValidateInResponseTo.always,
       idpCert: 'certificate',
-      audience: 'https://docmost.example.com/api/sso/provider/callback',
+      issuer: 'https://docmost.example.com/api/sso/saml/provider/login',
+      audience: 'https://docmost.example.com/api/sso/saml/provider/login',
+      callbackUrl: 'https://docmost.example.com/api/sso/saml/provider/callback',
+      disableRequestedAuthnContext: false,
     });
+    expect(() =>
+      buildSamlOptions(
+        {
+          samlUrl: 'https://idp.example.com/sso',
+          samlCertificate: 'certificate',
+        } as any,
+        'https://docmost.example.com/api/sso/saml/provider/login',
+        'https://docmost.example.com/api/sso/saml/provider/callback',
+        false,
+      ),
+    ).toThrow(BadRequestException);
   });
 
   it('requires LDAPS and escaped user filters with bounded timeouts', () => {
@@ -25,7 +42,7 @@ describe('federation protocol configurations', () => {
       {
         ldapUrl: 'ldaps://directory.example.com',
         ldapBaseDn: 'dc=example,dc=com',
-        ldapUserSearchFilter: '(uid={username})',
+        ldapUserSearchFilter: '(uid={{username}})',
       } as any,
       'a*)(b',
     );

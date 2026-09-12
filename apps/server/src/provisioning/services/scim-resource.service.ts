@@ -15,8 +15,8 @@ import { AUDIT_SERVICE, IAuditService } from '../../integrations/audit/audit.ser
 
 export type ScimUser = {
   userName: string;
-  externalId?: string;
-  name?: { formatted?: string };
+  externalId?: string | null;
+  name?: { formatted?: string | null } | null;
   active?: boolean;
 };
 export type ScimGroup = {
@@ -24,6 +24,12 @@ export type ScimGroup = {
   externalId?: string;
   members?: Array<{ value: string }>;
 };
+export type ScimPatchOperation = {
+  op: string;
+  path?: string;
+  value?: unknown;
+};
+type Pagination = { startIndex: number; count: number };
 
 @Injectable()
 export class ScimResourceService {
@@ -39,6 +45,7 @@ export class ScimResourceService {
     count = 100,
     filter?: string,
   ) {
+    const page = this.pagination(startIndex, count);
     let query = this.db
       .selectFrom('users')
       .select([
@@ -66,22 +73,23 @@ export class ScimResourceService {
         match.value === 'true' ? 'is' : 'is not',
         null,
       );
+    const pageQuery = query
+      .orderBy('id asc')
+      .limit(page.count)
+      .offset(page.startIndex - 1);
     const [total, rows] = await Promise.all([
       query
         .clearSelect()
         .select((expression) => expression.fn.countAll<number>().as('count'))
         .executeTakeFirstOrThrow(),
-      query
-        .limit(Math.min(Math.max(count, 1), 100))
-        .offset(Math.max(startIndex - 1, 0))
-        .execute(),
+      pageQuery.execute(),
     ]);
     return this.list(
       'User',
       rows.map((row) => this.user(row)),
       Number(total.count),
-      startIndex,
-      count,
+      page.startIndex,
+      rows.length,
     );
   }
 
@@ -191,6 +199,16 @@ export class ScimResourceService {
     return user;
   }
 
+  async patchUser(
+    workspaceId: string,
+    id: string,
+    operations: ScimPatchOperation[],
+  ) {
+    const current = await this.getUser(workspaceId, id);
+    const input = this.userPatch(current, operations);
+    return this.replaceUser(workspaceId, id, input);
+  }
+
   async deleteUser(workspaceId: string, id: string) {
     await this.getUser(workspaceId, id);
     await this.db
@@ -239,6 +257,7 @@ export class ScimResourceService {
     count = 100,
     filter?: string,
   ) {
+    const page = this.pagination(startIndex, count);
     let query = this.db
       .selectFrom('groups')
       .select(['id', 'name', 'scimExternalId', 'createdAt', 'updatedAt'])
@@ -255,15 +274,16 @@ export class ScimResourceService {
       query = query.where('id', '=', match[2]);
     if (match?.[1].toLowerCase() === 'externalid')
       query = query.where('scimExternalId', '=', match[2]);
+    const pageQuery = query
+      .orderBy('id asc')
+      .limit(page.count)
+      .offset(page.startIndex - 1);
     const [total, rows] = await Promise.all([
       query
         .clearSelect()
         .select((expression) => expression.fn.countAll<number>().as('count'))
         .executeTakeFirstOrThrow(),
-      query
-        .limit(Math.min(Math.max(count, 1), 100))
-        .offset(Math.max(startIndex - 1, 0))
-        .execute(),
+      pageQuery.execute(),
     ]);
     const members = await this.members(
       workspaceId,
@@ -273,8 +293,8 @@ export class ScimResourceService {
       'Group',
       rows.map((row) => this.group(row, members)),
       Number(total.count),
-      startIndex,
-      count,
+      page.startIndex,
+      rows.length,
     );
   }
 
@@ -304,8 +324,9 @@ export class ScimResourceService {
   async patchGroup(
     workspaceId: string,
     id: string,
-    operations: Array<{ op: string; path?: string; value?: unknown }>,
+    operations: ScimPatchOperation[],
   ) {
+    this.groupOperations(operations);
     const current = await this.getGroup(workspaceId, id);
     const rows = await this.db
       .selectFrom('groupMembershipSources')
@@ -320,37 +341,184 @@ export class ScimResourceService {
     let externalId = current.externalId;
     for (const operation of operations) {
       const path = operation.path?.toLowerCase();
-      if (
-        operation.op.toLowerCase() === 'replace' &&
-        path === 'displayname' &&
-        typeof operation.value === 'string'
-      )
-        displayName = operation.value;
-      else if (
-        operation.op.toLowerCase() === 'replace' &&
-        path === 'externalid' &&
-        typeof operation.value === 'string'
-      )
-        externalId = operation.value;
-      else if (path === 'members' || this.memberFilter(path)) {
-        const values = Array.isArray(operation.value)
-          ? (operation.value as Array<{ value: string }>)
-          : [];
-        const ids = values.length
-          ? values.map((value) => value.value)
-          : (this.memberFilter(path) ?? []);
-        if (operation.op.toLowerCase() === 'replace') members = ids;
-        if (operation.op.toLowerCase() === 'add')
-          members = [...new Set([...members, ...ids])];
-        if (operation.op.toLowerCase() === 'remove')
-          members = members.filter((member) => !ids.includes(member));
-      } else throw new BadRequestException('Unsupported SCIM PATCH operation');
+      const op = operation.op.toLowerCase();
+      if (path === 'displayname' || path === 'externalid') {
+        if (op !== 'replace' || typeof operation.value !== 'string') {
+          throw new BadRequestException('Unsupported SCIM PATCH operation');
+        }
+        if (path === 'displayname') displayName = operation.value;
+        else externalId = operation.value;
+        continue;
+      }
+      const filter = this.memberFilter(path);
+      if (path !== 'members' && !filter) {
+        throw new BadRequestException('Unsupported SCIM PATCH operation');
+      }
+      const values = this.memberValues(operation.value);
+      if (op === 'replace') {
+        if (!path || filter || values === undefined) {
+          throw new BadRequestException('Unsupported SCIM PATCH operation');
+        }
+        members = values;
+      } else if (op === 'add') {
+        if (values === undefined) {
+          throw new BadRequestException('Unsupported SCIM PATCH operation');
+        }
+        members = [...new Set([...members, ...values])];
+      } else if (op === 'remove') {
+        if (operation.value === undefined && path === 'members') {
+          members = [];
+        } else {
+          const removal = values ?? filter;
+          if (!removal) {
+            throw new BadRequestException('Unsupported SCIM PATCH operation');
+          }
+          members = members.filter((member) => !removal.includes(member));
+        }
+      } else {
+        throw new BadRequestException('Unsupported SCIM PATCH operation');
+      }
     }
     return this.replaceGroup(workspaceId, id, {
       displayName,
       externalId,
       members: members.map((value) => ({ value })),
     });
+  }
+
+  private userPatch(
+    current: ScimUser,
+    operations: ScimPatchOperation[],
+  ): ScimUser {
+    this.operations(operations);
+    let next = { ...current };
+    for (const operation of operations) {
+      if (operation.op.toLowerCase() !== 'replace') {
+        throw new BadRequestException('Unsupported SCIM PATCH operation');
+      }
+      const values =
+        operation.path === undefined
+          ? this.userValues(operation.value)
+          : this.userPath(operation.path, operation.value);
+      next = { ...next, ...values };
+    }
+    return next;
+  }
+
+  private userPath(path: string, value: unknown): Partial<ScimUser> {
+    const field = path.toLowerCase();
+    if (field === 'username') return this.userValues({ userName: value });
+    if (field === 'externalid') return this.userValues({ externalId: value });
+    if (field === 'active') return this.userValues({ active: value });
+    if (field === 'name') return this.userValues({ name: value });
+    throw new BadRequestException('Unsupported SCIM PATCH operation');
+  }
+
+  private userValues(value: unknown): Partial<ScimUser> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new BadRequestException('Unsupported SCIM PATCH operation');
+    }
+    const values = value as Record<string, unknown>;
+    const keys = Object.keys(values);
+    if (!keys.length || keys.some((key) => !this.userKey(key))) {
+      throw new BadRequestException('Unsupported SCIM PATCH operation');
+    }
+    const result: Partial<ScimUser> = {};
+    if ('userName' in values) {
+      if (typeof values.userName !== 'string' || !values.userName) {
+        throw new BadRequestException('Unsupported SCIM PATCH operation');
+      }
+      result.userName = values.userName;
+    }
+    if ('externalId' in values) {
+      const externalId = values.externalId;
+      if (externalId === null) result.externalId = null;
+      else if (typeof externalId === 'string') result.externalId = externalId;
+      else throw new BadRequestException('Unsupported SCIM PATCH operation');
+    }
+    if ('active' in values) {
+      if (typeof values.active !== 'boolean') {
+        throw new BadRequestException('Unsupported SCIM PATCH operation');
+      }
+      result.active = values.active;
+    }
+    if ('name' in values) result.name = this.userName(values.name);
+    return result;
+  }
+
+  private userName(value: unknown): ScimUser['name'] {
+    if (value === null) return null;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new BadRequestException('Unsupported SCIM PATCH operation');
+    }
+    const name = value as Record<string, unknown>;
+    if (
+      !Object.keys(name).length ||
+      Object.keys(name).some((key) => key !== 'formatted') ||
+      ('formatted' in name &&
+        typeof name.formatted !== 'string' &&
+        name.formatted !== null)
+    ) {
+      throw new BadRequestException('Unsupported SCIM PATCH operation');
+    }
+    return { formatted: name.formatted as string | null | undefined };
+  }
+
+  private userKey(key: string): boolean {
+    return ['userName', 'externalId', 'active', 'name'].includes(key);
+  }
+
+  private operations(operations: ScimPatchOperation[]): void {
+    if (!Array.isArray(operations) || !operations.length) {
+      throw new BadRequestException('SCIM PATCH requires Operations');
+    }
+    if (
+      operations.some(
+        (operation) =>
+          typeof operation?.op !== 'string' ||
+          (operation.path !== undefined && typeof operation.path !== 'string'),
+      )
+    ) {
+      throw new BadRequestException('Unsupported SCIM PATCH operation');
+    }
+  }
+
+  private groupOperations(operations: ScimPatchOperation[]): void {
+    this.operations(operations);
+    for (const operation of operations) {
+      const op = operation.op.toLowerCase();
+      const path = operation.path?.toLowerCase();
+      if (!['replace', 'add', 'remove'].includes(op)) {
+        throw new BadRequestException('Unsupported SCIM PATCH operation');
+      }
+      if (path === 'displayname' || path === 'externalid') {
+        if (op !== 'replace') {
+          throw new BadRequestException('Unsupported SCIM PATCH operation');
+        }
+        continue;
+      }
+      if (path !== 'members' && !this.memberFilter(path)) {
+        throw new BadRequestException('Unsupported SCIM PATCH operation');
+      }
+    }
+  }
+
+  private memberValues(value: unknown): string[] | undefined {
+    if (value === undefined) return undefined;
+    if (!Array.isArray(value)) {
+      throw new BadRequestException('Unsupported SCIM PATCH operation');
+    }
+    if (
+      value.some(
+        (member) =>
+          !member ||
+          typeof member !== 'object' ||
+          typeof (member as { value?: unknown }).value !== 'string',
+      )
+    ) {
+      throw new BadRequestException('Unsupported SCIM PATCH operation');
+    }
+    return value.map((member) => (member as { value: string }).value);
   }
 
   private memberFilter(path?: string): string[] | undefined {
@@ -392,6 +560,15 @@ export class ScimResourceService {
     if (field === 'active' && !match[3]) return undefined;
     if (field !== 'active' && !match[2]) return undefined;
     return { field, value: match[2] ?? match[3] };
+  }
+
+  private pagination(startIndex: number, count: number): Pagination {
+    return {
+      startIndex:
+        Number.isInteger(startIndex) && startIndex >= 1 ? startIndex : 1,
+      count:
+        Number.isInteger(count) && count >= 0 ? Math.min(count, 100) : 100,
+    };
   }
 
   private async audit(

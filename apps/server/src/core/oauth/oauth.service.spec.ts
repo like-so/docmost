@@ -1,6 +1,7 @@
 import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { OAuthService } from './oauth.service';
 import { UserRole } from '../../common/helpers/types/permission';
+import { AuditEvent, AuditResource } from '../../common/events/audit-events';
 
 const user = {
   id: 'user',
@@ -217,4 +218,75 @@ describe('OAuthService audit trail', () => {
       expect.objectContaining({ workspaceId: user.workspaceId, actorId: user.id }),
     );
   });
+
+  it('does not record grant revocation when creating a pending authorization', async () => {
+    const audit = { logWithContext: jest.fn() };
+    const values = jest.fn().mockReturnValue({ execute: jest.fn() });
+    const service = new OAuthService(
+      { insertInto: jest.fn().mockReturnValue({ values }) } as any,
+      {} as any,
+      {} as any,
+      audit as any,
+    );
+    jest.spyOn(service as any, 'client').mockResolvedValue({
+      id: 'client',
+      redirectUris: ['https://app.example/callback'],
+      scopes: ['read'],
+    });
+
+    await service.startAuthorization(user, 'session', {
+      clientId: 'client',
+      redirectUri: 'https://app.example/callback',
+      scopes: ['read'],
+      codeChallenge: 'challenge',
+      codeChallengeMethod: 'S256',
+    });
+
+    expect(audit.logWithContext).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: AuditEvent.OAUTH_GRANT_REVOKED }),
+      expect.anything(),
+    );
+  });
+
+  it('records an actual grant revocation against the grant resource', async () => {
+    const audit = { logWithContext: jest.fn() };
+    const grant = mutationQuery({ id: 'grant-id' });
+    const tokens = mutationQuery();
+    const service = new OAuthService(
+      {
+        updateTable: jest
+          .fn()
+          .mockReturnValueOnce(grant)
+          .mockReturnValueOnce(tokens),
+      } as any,
+      {} as any,
+      {} as any,
+      audit as any,
+    );
+
+    await service.revokeGrant(user, 'grant-id');
+
+    expect(audit.logWithContext).toHaveBeenCalledWith(
+      {
+        event: AuditEvent.OAUTH_GRANT_REVOKED,
+        resourceType: AuditResource.OAUTH_GRANT,
+        resourceId: 'grant-id',
+      },
+      expect.objectContaining({ workspaceId: user.workspaceId, actorId: user.id }),
+    );
+  });
 });
+
+function mutationQuery(result?: { id: string }) {
+  const query: any = {
+    execute: jest.fn().mockResolvedValue(undefined),
+    executeTakeFirst: jest.fn().mockResolvedValue(result),
+    returning: jest.fn(),
+    set: jest.fn(),
+    where: jest.fn(),
+  };
+  query.returning.mockReturnValue(query);
+  query.set.mockReturnValue(query);
+  query.where.mockReturnValue(query);
+  return query;
+}
