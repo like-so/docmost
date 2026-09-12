@@ -18,7 +18,7 @@
     "dev": "pnpm concurrently -n \"frontend,backend\" -c \"cyan,green\" \"pnpm run client:dev\" \"pnpm run server:dev\"",
     "clean": "rm -rf apps/*/dist packages/*/dist apps/client/node_modules/.vite",
     "agpl:validate": "node scripts/validate-agpl-build-boundary.mjs",
-    "agpl:build": "pnpm run agpl:validate && pnpm --filter server run build && pnpm --filter client run build && pnpm --filter @docmost/editor-ext run build"
+    "agpl:build": "pnpm run agpl:validate && pnpm --filter @docmost/editor-ext run build && pnpm --filter server run build && pnpm --filter client run build"
   },
   "dependencies": {
     "@braintree/sanitize-url": "7.1.2",
