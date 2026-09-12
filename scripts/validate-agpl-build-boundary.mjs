@@ -92,9 +92,9 @@ function validateBuildGraph(root, failures) {
   const rootPackage = readJson(root, 'package.json', failures);
   const expectedBuild = [
     'pnpm run agpl:validate',
+    'pnpm --filter @docmost/editor-ext run build',
     'pnpm --filter server run build',
     'pnpm --filter client run build',
-    'pnpm --filter @docmost/editor-ext run build',
   ].join(' && ');
   if (rootPackage?.scripts?.['agpl:build'] !== expectedBuild) {
     failures.push('package.json agpl:build must validate and explicitly build only AGPL targets.');
@@ -318,9 +318,9 @@ function runSelfTest() {
       'agpl:validate': 'node scripts/validate-agpl-build-boundary.mjs',
       'agpl:build': [
         'pnpm run agpl:validate',
+        'pnpm --filter @docmost/editor-ext run build',
         'pnpm --filter server run build',
         'pnpm --filter client run build',
-        'pnpm --filter @docmost/editor-ext run build',
       ].join(' && '),
     };
     writeFileSync(join(fixture, 'package.json'), JSON.stringify(rootPackage));
