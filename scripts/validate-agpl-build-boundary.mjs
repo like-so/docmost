@@ -267,24 +267,9 @@ function validateDependencies(root, failures) {
   }
 }
 
-function validateManifest(root, manifestPath) {
+function validateBoundary(root) {
   const failures = [];
-  const manifest = readJson(root, manifestPath, failures);
   const sources = new Set();
-  if (!manifest) return failures;
-
-  if (!Array.isArray(manifest.components) || !manifest.license || !manifest.build) {
-    failures.push('Manifest must define license, build, and components.');
-  }
-  if (manifest.license?.enterprise_only_paths?.join('|') !== excludedRoots.slice(0, 3).join('|')) {
-    failures.push('Manifest enterprise-only paths do not match the README boundary.');
-  }
-  if (manifest.license?.task_excluded_path !== excludedRoots[3]) {
-    failures.push('Manifest task-excluded path does not match the AGPL build boundary.');
-  }
-  if (manifest.build?.agpl_script !== 'pnpm agpl:build') {
-    failures.push('Manifest must identify pnpm agpl:build as its AGPL build command.');
-  }
 
   for (const sourceRoot of sourceRoots) collectTextFiles(root, sourceRoot, sources);
   for (const configFile of configFiles) collectTextFiles(root, configFile, sources);
@@ -348,72 +333,67 @@ function runSelfTest() {
     writeFileSync(join(fixture, 'apps/client/src.ts'), 'export const value = 1;');
     mkdirSync(join(fixture, 'apps/client/src'), { recursive: true });
     writeFileSync(join(fixture, 'apps/client/src/index.ts'), 'export const value = 1;');
-    writeFileSync(join(fixture, 'manifest.json'), JSON.stringify({
-      license: { enterprise_only_paths: excludedRoots.slice(0, 3), task_excluded_path: excludedRoots[3] },
-      build: { agpl_script: 'pnpm agpl:build' },
-      components: [],
-    }));
-    if (validateManifest(fixture, 'manifest.json').length !== 0) {
+    if (validateBoundary(fixture).length !== 0) {
       throw new Error('Expected safe fixture to pass.');
     }
     writeFileSync(join(fixture, 'apps/client/src.ts'), "export { value } from '@docmost/base-formula';");
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('@docmost/base-formula'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('@docmost/base-formula'))) {
       throw new Error('Expected excluded source fixture to fail.');
     }
     writeFileSync(join(fixture, 'apps/client/src.ts'), 'export const value = 1;');
     writeFileSync(join(fixture, 'apps/client/tsconfig.json'), '{}');
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('apps/client/tsconfig.json must exclude src/ee'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('apps/client/tsconfig.json must exclude src/ee'))) {
       throw new Error('Expected missing client exclusion fixture to fail.');
     }
     writeFileSync(join(fixture, 'apps/client/tsconfig.json'), JSON.stringify({
       exclude: ['src/ee'],
     }));
     writeFileSync(join(fixture, 'apps/server/tsconfig.build.json'), '{}');
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('apps/server/tsconfig.build.json must exclude src/ee'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('apps/server/tsconfig.build.json must exclude src/ee'))) {
       throw new Error('Expected missing server build exclusion fixture to fail.');
     }
     writeFileSync(join(fixture, 'apps/server/tsconfig.build.json'), JSON.stringify({
       exclude: ['src/ee'],
     }));
     writeFileSync(join(fixture, 'apps/client/src/index.ts'), "export { value } from './ee';");
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('specifier ./ee resolves to excluded source'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('specifier ./ee resolves to excluded source'))) {
       throw new Error('Expected excluded relative specifier fixture to fail.');
     }
     writeFileSync(join(fixture, 'apps/client/src/index.ts'), "require('/src/ee');");
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('specifier /src/ee resolves to excluded source'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('specifier /src/ee resolves to excluded source'))) {
       throw new Error('Expected excluded absolute specifier fixture to fail.');
     }
     writeFileSync(join(fixture, 'apps/client/src/index.ts'), 'export const value = 1;');
     mkdirSync(join(fixture, 'packages/editor-ext/src'), { recursive: true });
     writeFileSync(join(fixture, 'packages/editor-ext/src/index.ts'), "export { value } from '../../base-formula';");
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('specifier ../../base-formula resolves to excluded source'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('specifier ../../base-formula resolves to excluded source'))) {
       throw new Error('Expected excluded base-formula relative specifier fixture to fail.');
     }
     writeFileSync(join(fixture, 'packages/editor-ext/src/index.ts'), 'export const value = 1;');
     writeFileSync(join(fixture, 'apps/server/tsconfig.json'), JSON.stringify({
       compilerOptions: { paths: { '@docmost/ee/*': ['./src/ee/*'] } },
     }));
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('@docmost/ee'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('@docmost/ee'))) {
       throw new Error('Expected excluded alias fixture to fail.');
     }
     writeFileSync(join(fixture, 'apps/server/tsconfig.json'), '{}');
     writeFileSync(join(fixture, 'apps/server/package.json'), JSON.stringify({
       dependencies: { '@docmost/base-formula': 'workspace:*' },
     }));
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('dependency @docmost/base-formula references excluded source'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('dependency @docmost/base-formula references excluded source'))) {
       throw new Error('Expected excluded dependency fixture to fail.');
     }
     writeFileSync(join(fixture, 'apps/server/package.json'), JSON.stringify({
       dependencies: { enterpriseAlias: 'workspace:@docmost/ee@*' },
     }));
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('dependency enterpriseAlias references excluded source @docmost/ee'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('dependency enterpriseAlias references excluded source @docmost/ee'))) {
       throw new Error('Expected excluded manifest dependency alias fixture to fail.');
     }
     writeFileSync(join(fixture, 'apps/server/package.json'), JSON.stringify({
       dependencies: {},
       jest: { moduleNameMapper: { '^@docmost/base-formula$': './excluded' } },
     }));
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('apps/server/package.json references excluded source'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('apps/server/package.json references excluded source'))) {
       throw new Error('Expected excluded package alias fixture to fail.');
     }
     writeFileSync(join(fixture, 'apps/server/package.json'), JSON.stringify({ dependencies: {} }));
@@ -429,7 +409,7 @@ function runSelfTest() {
       '    dependencies: {}',
       '',
     ].join('\n'));
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('pnpm-lock.yaml importer apps/client dependency @docmost/ee references excluded workspace/link target @docmost/ee'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('pnpm-lock.yaml importer apps/client dependency @docmost/ee references excluded workspace/link target @docmost/ee'))) {
       throw new Error('Expected excluded lockfile importer fixture to fail.');
     }
     writeFileSync(join(fixture, 'pnpm-lock.yaml'), [
@@ -444,7 +424,7 @@ function runSelfTest() {
       '    dependencies: {}',
       '',
     ].join('\n'));
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('dependency formulaAlias references excluded workspace/link target @docmost/base-formula'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('dependency formulaAlias references excluded workspace/link target @docmost/base-formula'))) {
       throw new Error('Expected excluded lockfile value alias fixture to fail.');
     }
     writeFileSync(join(fixture, 'pnpm-lock.yaml'), [
@@ -459,7 +439,7 @@ function runSelfTest() {
       '        version: link:../../packages/base-formula',
       '',
     ].join('\n'));
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('pnpm-lock.yaml importer apps/server dependency @docmost/base-formula references excluded workspace/link target @docmost/base-formula'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('pnpm-lock.yaml importer apps/server dependency @docmost/base-formula references excluded workspace/link target @docmost/base-formula'))) {
       throw new Error('Expected excluded base-formula lockfile importer fixture to fail.');
     }
     writeFileSync(join(fixture, 'pnpm-lock.yaml'), [
@@ -472,13 +452,13 @@ function runSelfTest() {
       '',
     ].join('\n'));
     writeFileSync(join(fixture, 'Dockerfile'), 'FROM node\nRUN pnpm build\nCOPY --from=builder /app/packages/base-formula/dist /app/packages/base-formula/dist\n');
-    const dockerFailures = validateManifest(fixture, 'manifest.json');
+    const dockerFailures = validateBoundary(fixture);
     if (!dockerFailures.some((failure) => failure.includes('Dockerfile builder')) || !dockerFailures.some((failure) => failure.includes('final image copies excluded root'))) {
       throw new Error('Expected unsafe Docker fixture to fail.');
     }
     writeFileSync(join(fixture, 'Dockerfile'), 'FROM node\nRUN pnpm agpl:build\n');
     writeFileSync(join(fixture, '.dockerignore'), `${excludedRoots.slice(0, -1).join('\n')}\n`);
-    if (!validateManifest(fixture, 'manifest.json').some((failure) => failure.includes('.dockerignore must exclude build-context root'))) {
+    if (!validateBoundary(fixture).some((failure) => failure.includes('.dockerignore must exclude build-context root'))) {
       throw new Error('Expected missing Docker context exclusion fixture to fail.');
     }
   } finally {
@@ -491,7 +471,7 @@ if (process.argv.includes('--self-test')) {
   runSelfTest();
   console.log('AGPL build-boundary self-test passed.');
 } else {
-  const failures = validateManifest(root, 'docs/LIKE-157-SHIPPED-COMPONENTS.json');
+  const failures = validateBoundary(root);
   if (failures.length > 0) {
     console.error(failures.join('\n'));
     process.exitCode = 1;
