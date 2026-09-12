@@ -30,16 +30,12 @@ import {
   SpaceCaslAction,
   SpaceCaslSubject,
 } from '../casl/interfaces/space-ability.type';
-import { LicenseCheckService } from '../../integrations/environment/license-check.service';
 import { EnvironmentService } from '../../integrations/environment/environment.service';
 import { AuditEvent, AuditResource } from '../../common/events/audit-events';
 import {
   AUDIT_SERVICE,
   IAuditService,
 } from '../../integrations/audit/audit.service';
-import { Feature, FeatureKey } from '../../common/features';
-
-const PUBLIC_SPACE_FEATURES: FeatureKey[] = [Feature.PUBLIC_SPACE_APPEARANCE];
 
 @UseGuards(JwtAuthGuard)
 @Controller('public-spaces')
@@ -49,7 +45,6 @@ export class PublicSpaceController {
     private readonly publicSpaceRepo: PublicSpaceRepo,
     private readonly spaceRepo: SpaceRepo,
     private readonly spaceAbility: SpaceAbilityFactory,
-    private readonly licenseCheckService: LicenseCheckService,
     private readonly environmentService: EnvironmentService,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
   ) {}
@@ -88,10 +83,7 @@ export class PublicSpaceController {
       dto.spaceSlug,
       workspace,
     );
-    return {
-      ...info,
-      features: this.publicFeatures(workspace),
-    };
+    return info;
   }
 
   @Public()
@@ -100,10 +92,7 @@ export class PublicSpaceController {
   async getDirectory(@AuthWorkspace() workspace: Workspace) {
     const directory =
       await this.publicSpaceService.getPublicSpaceDirectory(workspace);
-    return {
-      ...directory,
-      features: this.publicFeatures(workspace),
-    };
+    return directory;
   }
 
   @Public()
@@ -117,10 +106,7 @@ export class PublicSpaceController {
       dto.spaceSlug,
       workspace,
     );
-    return {
-      ...treeData,
-      features: this.publicFeatures(workspace),
-    };
+    return treeData;
   }
 
   @Public()
@@ -136,10 +122,7 @@ export class PublicSpaceController {
       workspace,
       { includeContent: dto.contentless !== true },
     );
-    return {
-      ...pageData,
-      features: this.publicFeatures(workspace),
-    };
+    return pageData;
   }
 
   @Public()
@@ -153,16 +136,6 @@ export class PublicSpaceController {
       dto.spaceSlug,
       dto.references,
       workspace,
-    );
-  }
-
-  private publicFeatures(workspace: Workspace): string[] {
-    const features = this.licenseCheckService.resolveFeatures(
-      workspace.licenseKey,
-      workspace.plan,
-    );
-    return PUBLIC_SPACE_FEATURES.filter((feature) =>
-      features.includes(feature),
     );
   }
 
@@ -221,7 +194,7 @@ export class PublicSpaceController {
     const prevByline = (prev?.settings as any)?.byline;
     const nextSettings = publicSpace?.settings as any;
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.SPACE_UPDATED,
       resourceType: AuditResource.SPACE,
       resourceId: space.id,

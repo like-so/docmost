@@ -1,4 +1,9 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
 import * as path from 'path';
 import { jsonToText } from '../../../collaboration/collaboration.util';
 import { InjectKysely } from 'nestjs-kysely';
@@ -32,11 +37,13 @@ import {
 import { executeTx } from '@docmost/db/utils';
 import { BacklinkRepo } from '@docmost/db/repos/backlink/backlink.repo';
 import { ImportAttachmentService } from './import-attachment.service';
-import { ModuleRef } from '@nestjs/core';
 import { PageService } from '../../../core/page/services/page.service';
 import { ImportPageNode } from '../dto/file-task-dto';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { EnvironmentService } from '../../environment/environment.service';
+import * as bytes from 'bytes';
 import { EventName } from '../../../common/events/event.contants';
+import { prepareConfluenceXml } from '../utils/confluence.utils';
 import { AuditEvent, AuditResource } from '../../../common/events/audit-events';
 import {
   AUDIT_SERVICE,
@@ -54,9 +61,9 @@ export class FileImportTaskService {
     private readonly backlinkRepo: BacklinkRepo,
     @InjectKysely() private readonly db: KyselyDB,
     private readonly importAttachmentService: ImportAttachmentService,
-    private moduleRef: ModuleRef,
     private eventEmitter: EventEmitter2,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
+    private readonly environmentService: EnvironmentService,
   ) {}
 
   async processZIpImport(fileTaskId: string): Promise<void> {
@@ -96,7 +103,11 @@ export class FileImportTaskService {
         fileTask.filePath,
       );
       await pipeline(fileStream, createWriteStream(tmpZipPath));
-      await extractZip(tmpZipPath, tmpExtractDir);
+      await extractZip(
+        tmpZipPath,
+        tmpExtractDir,
+        bytes(this.environmentService.getFileImportSizeLimit()),
+      );
     } catch (err) {
       await cleanupTmpFile();
       await cleanupTmpDir();
@@ -105,37 +116,18 @@ export class FileImportTaskService {
     }
 
     try {
-      if (
-        fileTask.source === FileImportSource.Generic ||
-        fileTask.source === FileImportSource.Notion
-      ) {
-        await this.processGenericImport({
-          extractDir: tmpExtractDir,
-          fileTask,
-        });
-      }
-
+      const pageDir =
+        fileTask.source === FileImportSource.Confluence
+          ? path.join(tmpExtractDir, 'confluence-pages')
+          : tmpExtractDir;
       if (fileTask.source === FileImportSource.Confluence) {
-        let ConfluenceModule: any;
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          ConfluenceModule = require('./../../../ee/confluence-import/confluence-import.service');
-        } catch (err) {
-          this.logger.error(
-            'Confluence import requested but EE module not bundled in this build',
-          );
-          return;
-        }
-        const confluenceImportService = this.moduleRef.get(
-          ConfluenceModule.ConfluenceImportService,
-          { strict: false },
-        );
-
-        await confluenceImportService.processConfluenceImport({
-          extractDir: tmpExtractDir,
-          fileTask,
-        });
+        await prepareConfluenceXml(tmpExtractDir);
       }
+      await this.processGenericImport({
+        extractDir: tmpExtractDir,
+        pageDir,
+        fileTask,
+      });
       try {
         await this.updateTaskStatus(fileTaskId, FileTaskStatus.Success, null);
         await cleanupTmpFile();
@@ -158,11 +150,12 @@ export class FileImportTaskService {
 
   async processGenericImport(opts: {
     extractDir: string;
+    pageDir?: string;
     fileTask: FileTask;
   }): Promise<void> {
-    const { extractDir, fileTask } = opts;
+    const { extractDir, pageDir = extractDir, fileTask } = opts;
     const isNotion = fileTask.source === FileImportSource.Notion;
-    const allFiles = await collectMarkdownAndHtmlFiles(extractDir);
+    const allFiles = await collectMarkdownAndHtmlFiles(pageDir);
     const attachmentCandidates = await buildAttachmentCandidates(extractDir);
     const docmostMetadata = await readDocmostMetadata(extractDir);
 
@@ -264,7 +257,8 @@ export class FileImportTaskService {
           const partialId = extractNotionPartialId(folderName);
           const strippedFolderName = stripNotionID(folderName);
           const isSameDir = (fileDir: string) =>
-            fileDir === parentDir || (parentDir === '.' && !fileDir.includes('/'));
+            fileDir === parentDir ||
+            (parentDir === '.' && !fileDir.includes('/'));
 
           for (const [filePath, page] of pagesMap.entries()) {
             if (!isSameDir(path.dirname(filePath))) continue;
@@ -276,7 +270,10 @@ export class FileImportTaskService {
               const fullIdMatch = fileBase.match(/[a-f0-9]{32}$/i);
               if (!fullIdMatch) continue;
               const fullId = fullIdMatch[0].toLowerCase();
-              if (!fullId.startsWith(partialId.prefix) || !fullId.endsWith(partialId.suffix)) {
+              if (
+                !fullId.startsWith(partialId.prefix) ||
+                !fullId.endsWith(partialId.suffix)
+              ) {
                 continue;
               }
             }
@@ -457,7 +454,11 @@ export class FileImportTaskService {
 
     calculateLevels();
 
-    if (pagesMap.size < 1) return;
+    if (pagesMap.size < 1) {
+      throw new BadRequestException(
+        'Import archive does not contain Markdown or HTML pages',
+      );
+    }
 
     // Process pages level by level sequentially to respect foreign key constraints
     const allBacklinks: any[] = [];
@@ -503,6 +504,8 @@ export class FileImportTaskService {
                 pageId: page.id,
                 fileTask,
                 attachmentCandidates,
+                isConfluenceImport:
+                  fileTask.source === FileImportSource.Confluence,
               });
 
             const { html, backlinks, pageIcon } = await formatImportHtml({
@@ -599,7 +602,7 @@ export class FileImportTaskService {
           },
         }));
 
-        this.auditService.logBatchWithContext(auditPayloads, {
+        await this.auditService.logBatchWithContext(auditPayloads, {
           workspaceId: fileTask.workspaceId,
           actorId: fileTask.creatorId,
           actorType: 'user',

@@ -70,4 +70,5 @@ export type JwtOAuthPayload = {
   iss: string;
   jti: string;
   type: JwtType.OAUTH_ACCESS;
+
 };

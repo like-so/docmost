@@ -40,6 +40,10 @@ export interface ICollabToken {
 }
 
 export interface ILoginResponse {
+  mfaRequired?: true;
+  challengeId?: string;
+  mfaSetupRequired?: true;
+  setupId?: string;
   userHasMfa?: boolean;
   requiresMfaSetup?: boolean;
   mfaToken?: string;

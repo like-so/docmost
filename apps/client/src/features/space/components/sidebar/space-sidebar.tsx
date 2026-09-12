@@ -27,7 +27,6 @@ import {
   useUnwatchSpaceMutation,
 } from "@/features/space/queries/space-watcher-query.ts";
 import classes from "./space-sidebar.module.css";
-import React from "react";
 import { useAtom } from "jotai";
 import { useTreeMutation } from "@/features/page/tree/hooks/use-tree-mutation.ts";
 import { Link, useLocation, useParams } from "react-router-dom";
@@ -54,13 +53,6 @@ import {
 import { mobileSidebarAtom } from "@/components/layouts/global/hooks/atoms/sidebar-atom.ts";
 import { useToggleSidebar } from "@/components/layouts/global/hooks/hooks/use-toggle-sidebar.ts";
 import { searchSpotlight } from "@/features/search/constants";
-const TemplatePickerModal = React.lazy(
-  () => import("@/ee/template/components/template-picker-modal"),
-);
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { useUpgradeLabel } from "@/ee/hooks/use-upgrade-label";
-import { Feature } from "@/ee/features";
-import { ErrorBoundary } from "react-error-boundary";
 
 export function SpaceSidebar() {
   const { t } = useTranslation();
@@ -255,12 +247,6 @@ function SpaceMenu({
     useDisclosure(false);
   const [exportOpened, { open: openExportModal, close: closeExportModal }] =
     useDisclosure(false);
-  const [
-    templatePickerOpened,
-    { open: openTemplatePicker, close: closeTemplatePicker },
-  ] = useDisclosure(false);
-  const hasTemplates = useHasFeature(Feature.TEMPLATES);
-  const upgradeLabel = useUpgradeLabel();
 
   const { data: watchStatus } = useSpaceWatchStatusQuery(spaceId);
   const watchMutation = useWatchSpaceMutation();
@@ -333,21 +319,13 @@ function SpaceMenu({
           {canManagePages && (
             <>
               <Menu.Divider />
-              <Tooltip
-                label={upgradeLabel}
-                disabled={hasTemplates}
-                position="right"
-                withArrow
+              <Menu.Item
+                component={Link}
+                to="/templates"
+                leftSection={<IconTemplate size={16} />}
               >
-                <Menu.Item
-                  onClick={hasTemplates ? openTemplatePicker : undefined}
-                  leftSection={<IconTemplate size={16} />}
-                  data-disabled={!hasTemplates || undefined}
-                  aria-disabled={!hasTemplates || undefined}
-                >
-                  {t("Templates")}
-                </Menu.Item>
-              </Tooltip>
+                {t("Templates")}
+              </Menu.Item>
             </>
           )}
 
@@ -407,17 +385,6 @@ function SpaceMenu({
         </>
       )}
 
-      {hasTemplates && templatePickerOpened && (
-        <ErrorBoundary fallbackRender={() => null}>
-          <React.Suspense fallback={null}>
-            <TemplatePickerModal
-              opened={templatePickerOpened}
-              onClose={closeTemplatePicker}
-              initialSpaceId={spaceId}
-            />
-          </React.Suspense>
-        </ErrorBoundary>
-      )}
     </>
   );
 }

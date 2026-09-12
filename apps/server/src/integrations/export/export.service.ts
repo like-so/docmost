@@ -39,6 +39,7 @@ import {
   getProsemirrorContent,
 } from '../../common/helpers/prosemirror/utils';
 import { htmlToMarkdown } from '@docmost/editor-ext';
+import { DocumentExportService } from './document-export.service';
 
 type AllowedAttachment = { id: string; fileName: string; filePath: string };
 
@@ -53,6 +54,7 @@ export class ExportService {
     private readonly storageService: StorageService,
     private readonly environmentService: EnvironmentService,
     private readonly domainService: DomainService,
+    private readonly documentExportService: DocumentExportService,
   ) {}
 
   async exportPage(format: string, page: Page, singlePage?: boolean) {
@@ -100,7 +102,18 @@ export class ExportService {
       return htmlToMarkdown(newPageHtml);
     }
 
-    return;
+    if (format === ExportFormat.Docx) {
+      return this.documentExportService.exportDocx(
+        getPageTitle(page.title),
+        pageHtml,
+      );
+    }
+
+    if (format === ExportFormat.Pdf) {
+      return this.documentExportService.exportPdf(pageHtml);
+    }
+
+    throw new BadRequestException('Unsupported export format');
   }
 
   async exportPages(
@@ -310,7 +323,11 @@ export class ExportService {
         );
 
         if (includeAttachments) {
-          await this.zipAttachments(updatedJsonContent, folder, allowedAttachments);
+          await this.zipAttachments(
+            updatedJsonContent,
+            folder,
+            allowedAttachments,
+          );
           updatedJsonContent =
             updateAttachmentUrlsToLocalPaths(updatedJsonContent);
         }
@@ -390,7 +407,9 @@ export class ExportService {
     for (const siblings of Object.values(tree)) {
       for (const page of siblings) {
         if (!spaceId) spaceId = page.spaceId;
-        for (const id of getAttachmentIds(getProsemirrorContent(page.content))) {
+        for (const id of getAttachmentIds(
+          getProsemirrorContent(page.content),
+        )) {
           allAttachmentIds.add(id);
         }
       }
@@ -411,9 +430,7 @@ export class ExportService {
     if (!ignorePermissions && userId) {
       const ownerPageIds = [
         ...new Set(
-          attachments
-            .map((a) => a.pageId)
-            .filter((id): id is string => !!id),
+          attachments.map((a) => a.pageId).filter((id): id is string => !!id),
         ),
       ];
       const accessible = ownerPageIds.length

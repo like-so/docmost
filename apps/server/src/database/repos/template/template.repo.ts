@@ -110,12 +110,17 @@ export class TemplateRepo {
   async insertTemplate(
     insertableTemplate: InsertableTemplate,
     trx?: KyselyTransaction,
-  ): Promise<{ id: string }> {
+  ): Promise<{
+    id: string;
+    title: string;
+    description: string | null;
+    spaceId: string | null;
+  }> {
     const db = dbOrTx(this.db, trx);
     return db
       .insertInto('templates')
       .values(insertableTemplate)
-      .returning('id')
+      .returning(['id', 'title', 'description', 'spaceId'])
       .executeTakeFirst();
   }
 

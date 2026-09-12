@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Group, Text, ScrollArea, ActionIcon, Tooltip } from "@mantine/core";
+import { Group, Text, ScrollArea, ActionIcon } from "@mantine/core";
 import {
   IconUser,
   IconSettings,
@@ -19,24 +19,17 @@ import {
 import { Link, useLocation } from "react-router-dom";
 import classes from "./settings.module.css";
 import { useTranslation } from "react-i18next";
-import { isCloud } from "@/lib/config.ts";
 import useUserRole from "@/hooks/use-user-role.tsx";
 import { useAtom } from "jotai";
-import { entitlementAtom } from "@/ee/entitlement/entitlement-atom";
-import { Feature } from "@/ee/features";
-import { useUpgradeLabel } from "@/ee/hooks/use-upgrade-label";
 import {
   prefetchApiKeyManagement,
   prefetchApiKeys,
-  prefetchBilling,
   prefetchGroups,
-  prefetchLicense,
   prefetchScimTokens,
   prefetchShares,
   prefetchSpaces,
   prefetchSsoProviders,
   prefetchWorkspaceMembers,
-  prefetchAuditLogs,
   prefetchVerifiedPages,
 } from "@/components/settings/settings-queries.tsx";
 import AppVersion from "@/components/settings/app-version.tsx";
@@ -48,9 +41,7 @@ type DataItem = {
   label: string;
   icon: React.ElementType;
   path: string;
-  feature?: string;
   role?: "admin" | "owner";
-  env?: "cloud" | "selfhosted";
 };
 
 type DataGroup = {
@@ -72,7 +63,6 @@ const groupedData: DataGroup[] = [
         label: "API keys",
         icon: IconKey,
         path: "/settings/account/api-keys",
-        feature: Feature.API_KEYS,
       },
     ],
   },
@@ -82,17 +72,9 @@ const groupedData: DataGroup[] = [
       { label: "General", icon: IconSettings, path: "/settings/workspace" },
       { label: "Members", icon: IconUsers, path: "/settings/members" },
       {
-        label: "Billing",
-        icon: IconCoin,
-        path: "/settings/billing",
-        role: "admin",
-        env: "cloud",
-      },
-      {
         label: "Security & SSO",
         icon: IconLock,
         path: "/settings/security",
-        feature: Feature.SECURITY_SETTINGS,
         role: "admin",
       },
       { label: "Groups", icon: IconUsersGroup, path: "/settings/groups" },
@@ -102,13 +84,17 @@ const groupedData: DataGroup[] = [
         label: "Verified pages",
         icon: IconShieldCheck,
         path: "/settings/verifications",
-        feature: Feature.PAGE_VERIFICATION,
       },
       {
         label: "API management",
         icon: IconKey,
         path: "/settings/api-keys",
-        feature: Feature.API_KEYS,
+        role: "admin",
+      },
+      {
+        label: "OAuth clients",
+        icon: IconKey,
+        path: "/settings/oauth-clients",
         role: "admin",
       },
       {
@@ -121,19 +107,7 @@ const groupedData: DataGroup[] = [
         label: "Audit logs & SIEM",
         icon: IconHistory,
         path: "/settings/audit",
-        feature: Feature.AUDIT_LOGS,
         role: "owner",
-        env: "selfhosted",
-      },
-    ],
-  },
-  {
-    heading: "System",
-    items: [
-      {
-        label: "License & Edition",
-        icon: IconKey,
-        path: "/settings/license",
       },
     ],
   },
@@ -145,8 +119,6 @@ export default function SettingsSidebar() {
   const [active, setActive] = useState(location.pathname);
   const { goBack } = useSettingsNavigation();
   const { isAdmin, isOwner } = useUserRole();
-  const [entitlements] = useAtom(entitlementAtom);
-  const upgradeLabel = useUpgradeLabel();
   const [mobileSidebarOpened] = useAtom(mobileSidebarAtom);
   const toggleMobileSidebar = useToggleSidebar(mobileSidebarAtom);
 
@@ -154,27 +126,13 @@ export default function SettingsSidebar() {
     setActive(location.pathname);
   }, [location.pathname]);
 
-  const hasFeature = (f: string) =>
-    entitlements?.features?.includes(f) ?? false;
-
   const canShowItem = (item: DataItem) => {
-    if (item.env === "cloud" && !isCloud()) return false;
-    if (item.env === "selfhosted" && isCloud()) return false;
     if (item.role === "admin" && !isAdmin) return false;
     if (item.role === "owner" && !isOwner) return false;
     return true;
   };
 
-  const isItemDisabled = (item: DataItem) => {
-    if (!item.feature) return false;
-    return !hasFeature(item.feature);
-  };
-
   const menuItems = groupedData.map((group) => {
-    if (group.heading === "System" && (!isAdmin || isCloud())) {
-      return null;
-    }
-
     return (
       <div key={group.heading}>
         <Text c="dimmed" className={classes.linkHeader}>
@@ -196,14 +154,6 @@ export default function SettingsSidebar() {
             case "Groups":
               prefetchHandler = prefetchGroups;
               break;
-            case "Billing":
-              prefetchHandler = prefetchBilling;
-              break;
-            case "License & Edition":
-              if (entitlements?.tier !== "free") {
-                prefetchHandler = prefetchLicense;
-              }
-              break;
             case "Security & SSO":
               prefetchHandler = () => {
                 prefetchSsoProviders();
@@ -219,42 +169,11 @@ export default function SettingsSidebar() {
             case "API management":
               prefetchHandler = prefetchApiKeyManagement;
               break;
-            case "Audit logs & SIEM":
-              prefetchHandler = prefetchAuditLogs;
-              break;
             case "Verified pages":
               prefetchHandler = prefetchVerifiedPages;
               break;
             default:
               break;
-          }
-
-          const isDisabled = isItemDisabled(item);
-
-          if (isDisabled) {
-            return (
-              <Tooltip
-                key={item.label}
-                label={upgradeLabel}
-                position="right"
-                withArrow
-              >
-                <span
-                  className={classes.link}
-                  data-disabled
-                  role="link"
-                  aria-disabled="true"
-                  tabIndex={0}
-                  style={{
-                    opacity: 0.5,
-                    cursor: "not-allowed",
-                  }}
-                >
-                  <item.icon className={classes.linkIcon} stroke={2} />
-                  <span>{t(item.label)}</span>
-                </span>
-              </Tooltip>
-            );
           }
 
           return (
@@ -300,20 +219,7 @@ export default function SettingsSidebar() {
 
       <ScrollArea w="100%">{menuItems}</ScrollArea>
 
-      {!isCloud() && <AppVersion />}
-
-      {isCloud() && (
-        <div className={classes.text}>
-          <Text
-            size="sm"
-            c="dimmed"
-            component="a"
-            href="mailto:help@docmost.com"
-          >
-            help@docmost.com
-          </Text>
-        </div>
-      )}
+      <AppVersion />
     </div>
   );
 }

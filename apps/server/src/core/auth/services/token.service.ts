@@ -12,6 +12,7 @@ import {
   JwtCollabPayload,
   JwtExchangePayload,
   JwtMfaTokenPayload,
+  JwtOAuthPayload,
   JwtPayload,
   JwtPdfExportDownloadPayload,
   JwtPdfRenderPayload,
@@ -115,6 +116,28 @@ export class TokenService {
     };
 
     return this.jwtService.sign(payload, expiresIn ? { expiresIn } : {});
+  }
+
+  async generateOAuthToken(opts: {
+    user: User;
+    workspaceId: string;
+    grantId: string;
+    scope: string;
+    audience: string;
+    jti: string;
+    expiresIn: StringValue | number;
+  }): Promise<string> {
+    const payload: JwtOAuthPayload = {
+      sub: opts.user.id,
+      workspaceId: opts.workspaceId,
+      grantId: opts.grantId,
+      scope: opts.scope,
+      aud: opts.audience,
+      iss: this.environmentService.getAppUrl(),
+      jti: opts.jti,
+      type: JwtType.OAUTH_ACCESS,
+    };
+    return this.jwtService.sign(payload, { expiresIn: opts.expiresIn });
   }
 
   async generatePdfRenderToken(

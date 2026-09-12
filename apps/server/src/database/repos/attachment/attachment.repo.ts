@@ -185,6 +185,21 @@ export class AttachmentRepo {
       .executeTakeFirst();
   }
 
+  async updateSearchContent(
+    attachmentId: string,
+    textContent: string,
+  ): Promise<void> {
+    await this.db
+      .updateTable('attachments')
+      .set({
+        textContent,
+        tsv: sql`to_tsvector('english', f_unaccent(${textContent}))`,
+        updatedAt: new Date(),
+      })
+      .where('id', '=', attachmentId)
+      .execute();
+  }
+
   async claimAttachmentsForChat(
     attachmentIds: string[],
     aiChatId: string,

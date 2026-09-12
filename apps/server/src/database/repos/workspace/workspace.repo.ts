@@ -69,9 +69,7 @@ export class WorkspaceRepo {
     return query.executeTakeFirst();
   }
 
-  async findLicenseKeyById(
-    workspaceId: string,
-  ): Promise<string | undefined> {
+  async findLicenseKeyById(workspaceId: string): Promise<string | undefined> {
     const row = await this.db
       .selectFrom('workspaces')
       .select('licenseKey')
@@ -211,6 +209,23 @@ export class WorkspaceRepo {
       .executeTakeFirst();
   }
 
+  async updateAiProviderSettings(
+    workspaceId: string,
+    encryptedProvider: string | null,
+  ) {
+    return this.db
+      .updateTable('workspaces')
+      .set({
+        settings: sql`COALESCE(settings, '{}'::jsonb)
+                || jsonb_build_object('ai', COALESCE(settings->'ai', '{}'::jsonb)
+                || jsonb_build_object('providerSecret', ${encryptedProvider}))`,
+        updatedAt: new Date(),
+      })
+      .where('id', '=', workspaceId)
+      .returning(this.baseFields)
+      .executeTakeFirst();
+  }
+
   async updateAiEmbeddingFingerprint(
     workspaceId: string,
     fingerprint: { driver: string; model: string; dimensions: number },
@@ -326,5 +341,4 @@ export class WorkspaceRepo {
       .returning(this.baseFields)
       .executeTakeFirst();
   }
-
 }

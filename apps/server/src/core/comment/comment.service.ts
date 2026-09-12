@@ -206,6 +206,26 @@ export class CommentService {
     return comment;
   }
 
+  async resolve(comment: Comment, user: User, resolved: boolean) {
+    const updatedAt = new Date();
+    await this.commentRepo.updateComment(
+      {
+        resolvedAt: resolved ? updatedAt : null,
+        resolvedById: resolved ? user.id : null,
+        updatedAt,
+      },
+      comment.id,
+    );
+
+    const updated = await this.findById(comment.id);
+    this.wsService.emitCommentEvent(comment.spaceId, comment.pageId, {
+      operation: 'commentUpdated',
+      pageId: comment.pageId,
+      comment: updated,
+    });
+    return updated;
+  }
+
   private async queueCommentNotification(
     content: any,
     oldMentionIds: string[],

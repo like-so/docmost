@@ -17,7 +17,7 @@ import { IconInfoCircle } from "@tabler/icons-react";
 import { useAtom } from "jotai";
 import { userAtom } from "@/features/user/atoms/current-user-atom.ts";
 import { CustomAvatar } from "@/components/ui/custom-avatar.tsx";
-import { PageVerificationBadge } from "@/ee/page-verification";
+import { PageVerificationBadge } from "@/features/page-verification/components/page-verification-controls.tsx";
 import { useTranslation } from "react-i18next";
 import { IContributor } from "@/features/page/types/page.types.ts";
 import { FixedToolbar } from "@/features/editor/components/fixed-toolbar/fixed-toolbar";
@@ -105,6 +105,7 @@ export function FullEditor({
         editable={editable}
       />
       <PageByline
+        pageId={pageId}
         creator={creator}
         contributors={contributors}
         readOnly={!editable}
@@ -121,12 +122,13 @@ export function FullEditor({
 }
 
 type PageBylineProps = {
+  pageId: string;
   creator?: PageUser;
   contributors?: IContributor[];
   readOnly?: boolean;
 };
 
-function PageByline({ creator, contributors, readOnly }: PageBylineProps) {
+function PageByline({ pageId, creator, contributors, readOnly }: PageBylineProps) {
   const { t } = useTranslation();
   const detailsTriggerProps = useAsideTriggerProps("details");
 
@@ -214,7 +216,7 @@ function PageByline({ creator, contributors, readOnly }: PageBylineProps) {
         </ActionIcon>
       </Tooltip>
 
-      <PageVerificationBadge readOnly={readOnly} />
+      <PageVerificationBadge pageId={pageId} />
     </Group>
   );
 }

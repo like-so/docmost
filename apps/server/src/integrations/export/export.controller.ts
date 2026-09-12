@@ -72,7 +72,7 @@ export class ExportController {
       user.id,
     );
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.PAGE_EXPORTED,
       resourceType: AuditResource.PAGE,
       resourceId: page.id,
@@ -135,7 +135,7 @@ export class ExportController {
       user.id,
     );
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.SPACE_EXPORTED,
       resourceType: AuditResource.SPACE,
       resourceId: dto.spaceId,

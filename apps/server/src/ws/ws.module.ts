@@ -4,10 +4,11 @@ import { WsService } from './ws.service';
 import { WsTreeService } from './ws-tree.service';
 import { TokenModule } from '../core/auth/token.module';
 import { BaseRealtimeBridge } from './base-realtime.bridge';
+import { BaseModule } from '../core/base/base.module';
 
 @Global()
 @Module({
-  imports: [TokenModule],
+  imports: [TokenModule, BaseModule],
   providers: [WsGateway, WsService, WsTreeService, BaseRealtimeBridge],
   exports: [WsGateway, WsService, WsTreeService],
 })

@@ -132,7 +132,7 @@ export class ShareService {
         })
       : await this.pageRepo.findById(dto.pageId);
 
-    if (!page || page.deletedAt) {
+    if (!page || page.deletedAt || page.isBase) {
       throw new NotFoundException('Shared page not found');
     }
 

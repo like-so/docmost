@@ -26,6 +26,9 @@ export const AuditEvent = {
 
   // OAuth
   OAUTH_CLIENT_REGISTERED: 'oauth_client.registered',
+  OAUTH_CLIENT_DELETED: 'oauth_client.deleted',
+  OAUTH_CONSENT_GRANTED: 'oauth_consent.granted',
+  OAUTH_CONSENT_DENIED: 'oauth_consent.denied',
   OAUTH_GRANT_CREATED: 'oauth_grant.created',
   OAUTH_GRANT_REVOKED: 'oauth_grant.revoked',
 
@@ -115,7 +118,16 @@ export const AuditEvent = {
 
   // Template
   TEMPLATE_CREATED: 'template.created',
+  TEMPLATE_UPDATED: 'template.updated',
   TEMPLATE_DELETED: 'template.deleted',
+
+  // AI
+  AI_PROVIDER_UPDATED: 'ai.provider_updated',
+  AI_CHAT_CREATED: 'ai.chat_created',
+  AI_CHAT_DELETED: 'ai.chat_deleted',
+
+  // Bases
+  BASE_UPDATED: 'base.updated',
 } as const;
 
 export type AuditEventType = (typeof AuditEvent)[keyof typeof AuditEvent];
@@ -151,6 +163,10 @@ export const AuditResource = {
   LICENSE: 'license',
   SIEM_DESTINATION: 'siem_destination',
   TEMPLATE: 'template',
+  PAGE_VERIFICATION: 'page_verification',
+  AI_PROVIDER: 'ai_provider',
+  AI_CHAT: 'ai_chat',
+  BASE: 'base',
 } as const;
 
 export type AuditResourceType =

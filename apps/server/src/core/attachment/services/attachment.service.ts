@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -27,6 +28,8 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { QueueJob, QueueName } from '../../../integrations/queue/constants';
 import { Queue } from 'bullmq';
 import { createByteCountingStream } from '../../../common/helpers/utils';
+import * as mammoth from 'mammoth';
+import { extractText } from '@docmost/pdf-inspector';
 
 @Injectable()
 export class AttachmentService {
@@ -99,6 +102,8 @@ export class AttachmentService {
         attachment = await this.attachmentRepo.updateAttachment(
           {
             fileSize: preparedFile.fileSize,
+            textContent: null,
+            tsv: null,
             updatedAt: new Date(),
           },
           attachmentId,
@@ -138,6 +143,54 @@ export class AttachmentService {
     }
 
     return attachment;
+  }
+
+  async uploadChatFile(
+    filePromise: Promise<MultipartFile>,
+    userId: string,
+    workspaceId: string,
+    chatId: string,
+  ): Promise<Attachment> {
+    const chat = await this.db
+      .selectFrom('aiChats')
+      .select('id')
+      .where('id', '=', chatId)
+      .where('creatorId', '=', userId)
+      .where('workspaceId', '=', workspaceId)
+      .where('deletedAt', 'is', null)
+      .executeTakeFirst();
+    if (!chat) throw new ForbiddenException('Chat is not available');
+
+    if ((await this.attachmentRepo.findByAiChatId(chatId)).length >= 10) {
+      throw new BadRequestException('Too many chat attachments');
+    }
+
+    const prepared = await prepareFile(filePromise, { skipBuffer: true });
+    this.validateChatFile(prepared);
+    const attachmentId = uuid7();
+    const filePath = `${getAttachmentFolderPath(AttachmentType.Chat, workspaceId)}/${attachmentId}/${prepared.fileName}`;
+    const { stream, getBytesRead } = createByteCountingStream(
+      prepared.multiPartFile.file,
+    );
+
+    await this.uploadToDrive(filePath, stream);
+    prepared.fileSize = getBytesRead();
+    try {
+      const attachment = await this.saveAttachment({
+        attachmentId,
+        preparedFile: prepared,
+        filePath,
+        type: AttachmentType.Chat,
+        userId,
+        workspaceId,
+        aiChatId: chatId,
+      });
+      await this.indexAttachmentContent(attachment.id);
+      return attachment;
+    } catch (error) {
+      await this.deleteRedundantFile(filePath);
+      throw error;
+    }
   }
 
   async uploadImage(
@@ -231,6 +284,43 @@ export class AttachmentService {
     return attachment;
   }
 
+  async indexAttachmentContent(attachmentId: string): Promise<void> {
+    const attachment = await this.attachmentRepo.findById(attachmentId);
+    if (
+      !attachment ||
+      (attachment.type !== AttachmentType.File &&
+        attachment.type !== AttachmentType.Chat)
+    ) {
+      return;
+    }
+
+    const textContent = await this.extractAttachmentText(attachment);
+    if (textContent === null) {
+      return;
+    }
+
+    await this.attachmentRepo.updateSearchContent(attachment.id, textContent);
+  }
+
+  private async extractAttachmentText(
+    attachment: Attachment,
+  ): Promise<string | null> {
+    const extension = attachment.fileExt.toLowerCase();
+    if (!['.pdf', '.docx', '.txt'].includes(extension)) {
+      return null;
+    }
+
+    const content = await this.storageService.read(attachment.filePath);
+    if (extension === '.txt') {
+      return content.toString('utf8');
+    }
+    if (extension === '.pdf') {
+      return extractText(content);
+    }
+
+    return (await mammoth.extractRawText({ buffer: content })).value;
+  }
+
   async deleteRedundantFile(filePath: string) {
     try {
       await this.storageService.delete(filePath);
@@ -258,6 +348,7 @@ export class AttachmentService {
     workspaceId: string;
     pageId?: string;
     spaceId?: string;
+    aiChatId?: string;
     trx?: KyselyTransaction;
   }): Promise<Attachment> {
     const {
@@ -269,6 +360,7 @@ export class AttachmentService {
       workspaceId,
       pageId,
       spaceId,
+      aiChatId,
       trx,
     } = opts;
     return this.attachmentRepo.insertAttachment(
@@ -284,9 +376,24 @@ export class AttachmentService {
         workspaceId: workspaceId,
         pageId: pageId,
         spaceId: spaceId,
+        aiChatId,
       },
       trx,
     );
+  }
+
+  private validateChatFile(file: PreparedFile) {
+    const allowed = new Map([
+      ['.txt', 'text/plain'],
+      ['.pdf', 'application/pdf'],
+      [
+        '.docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      ],
+    ]);
+    if (allowed.get(file.fileExtension) !== file.mimeType) {
+      throw new BadRequestException('Unsupported chat attachment type');
+    }
   }
 
   async handleDeleteAiChatAttachments(aiChatId: string) {

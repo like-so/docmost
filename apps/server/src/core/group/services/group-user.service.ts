@@ -57,6 +57,12 @@ export class GroupUserService {
     workspaceId: string,
     trx?: KyselyTransaction,
   ): Promise<void> {
+    if (!trx) {
+      await executeTx(this.db, (ownedTrx) =>
+        this.addUsersToGroupBatch(userIds, groupId, workspaceId, ownedTrx),
+      );
+      return;
+    }
     const db = dbOrTx(this.db, trx);
     await this.groupService.findAndValidateGroup(groupId, workspaceId, trx);
 
@@ -87,9 +93,24 @@ export class GroupUserService {
       .values(groupUsersToInsert)
       .onConflict((oc) => oc.columns(['userId', 'groupId']).doNothing())
       .execute();
+    await db
+      .insertInto('groupMembershipSources')
+      .values(
+        validUsers.map((user) => ({
+          groupId,
+          userId: user.id,
+          source: 'manual',
+          providerId: '',
+          createdMembership: false,
+        })),
+      )
+      .onConflict((oc) =>
+        oc.columns(['groupId', 'userId', 'source', 'providerId']).doNothing(),
+      )
+      .execute();
 
     for (const user of validUsers) {
-      this.auditService.log({
+      await this.auditService.logInTransaction({
         event: AuditEvent.GROUP_MEMBER_ADDED,
         resourceType: AuditResource.GROUP,
         resourceId: groupId,
@@ -99,7 +120,7 @@ export class GroupUserService {
             userName: user.name,
           },
         },
-      });
+      }, trx);
     }
   }
 
@@ -138,7 +159,20 @@ export class GroupUserService {
 
     // TODO: use queue instead
     await executeTx(this.db, async (trx) => {
-      await this.groupUserRepo.delete(userId, groupId, { trx });
+      await trx
+        .deleteFrom('groupMembershipSources')
+        .where('groupId', '=', groupId)
+        .where('userId', '=', userId)
+        .where('source', '=', 'manual')
+        .where('providerId', '=', '')
+        .execute();
+      const source = await trx
+        .selectFrom('groupMembershipSources')
+        .select('id')
+        .where('groupId', '=', groupId)
+        .where('userId', '=', userId)
+        .executeTakeFirst();
+      if (!source) await this.groupUserRepo.delete(userId, groupId, { trx });
 
       for (const spaceId of spaceIds) {
         await this.watcherRepo.deleteByUsersWithoutSpaceAccess(
@@ -153,21 +187,18 @@ export class GroupUserService {
           { trx },
         );
       }
-    });
-
-    this.auditService.log({
-      event: AuditEvent.GROUP_MEMBER_REMOVED,
-      resourceType: AuditResource.GROUP,
-      resourceId: groupId,
-      changes: {
-        before: {
-          userId: user.id,
-          userName: user.name,
+      await this.auditService.logInTransaction(
+        {
+          event: AuditEvent.GROUP_MEMBER_REMOVED,
+          resourceType: AuditResource.GROUP,
+          resourceId: groupId,
+          changes: {
+            before: { userId: user.id, userName: user.name },
+          },
+          metadata: { groupName: group.name },
         },
-      },
-      metadata: {
-        groupName: group.name,
-      },
+        trx,
+      );
     });
   }
 }

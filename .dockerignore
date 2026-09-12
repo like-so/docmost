@@ -4,3 +4,7 @@
 /data
 **/.env*
 **/.nx
+apps/server/src/ee
+apps/client/src/ee
+packages/ee
+packages/base-formula

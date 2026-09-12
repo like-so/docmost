@@ -12,6 +12,7 @@ import {
 import { CommentService } from './comment.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
 import { UpdateCommentDto } from './dto/update-comment.dto';
+import { ResolveCommentDto } from './dto/resolve-comment.dto';
 import { PageIdDto, CommentIdDto } from './dto/comments.input';
 import { AuthUser } from '../../common/decorators/auth-user.decorator';
 import { AuthWorkspace } from '../../common/decorators/auth-workspace.decorator';
@@ -71,7 +72,7 @@ export class CommentController {
       createCommentDto,
     );
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.COMMENT_CREATED,
       resourceType: AuditResource.COMMENT,
       resourceId: comment.id,
@@ -149,6 +150,28 @@ export class CommentController {
   }
 
   @HttpCode(HttpStatus.OK)
+  @Post('resolve')
+  @OAuthScope('write')
+  async resolve(
+    @Body() dto: ResolveCommentDto,
+    @AuthUser() user: User,
+    @AuthWorkspace() workspace: Workspace,
+  ) {
+    const comment = await this.commentRepo.findById(dto.commentId);
+    if (!comment || comment.pageId !== dto.pageId) {
+      throw new NotFoundException('Comment not found');
+    }
+
+    const page = await this.pageRepo.findById(comment.pageId);
+    if (!page || page.workspaceId !== workspace.id || page.deletedAt) {
+      throw new NotFoundException('Page not found');
+    }
+
+    await this.pageAccessService.validateCanComment(page, user, workspace.id);
+    return this.commentService.resolve(comment, user, dto.resolved);
+  }
+
+  @HttpCode(HttpStatus.OK)
   @Post('delete')
   async delete(@Body() input: CommentIdDto, @AuthUser() user: User, @AuthWorkspace() workspace: Workspace) {
     const comment = await this.commentRepo.findById(input.commentId);
@@ -189,7 +212,7 @@ export class CommentController {
       commentId: comment.id,
     });
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.COMMENT_DELETED,
       resourceType: AuditResource.COMMENT,
       resourceId: comment.id,

@@ -134,7 +134,7 @@ export class UserService {
     );
 
     if (changes) {
-      this.auditService.log({
+      await this.auditService.log({
         event: AuditEvent.USER_UPDATED,
         resourceType: AuditResource.USER,
         resourceId: userId,

@@ -1,16 +1,16 @@
-import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
 import { SearchController } from './search.controller';
 
 describe('SearchController', () => {
   let controller: SearchController;
 
-  beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      controllers: [SearchController],
-    }).compile();
-
-    controller = module.get<SearchController>(SearchController);
+  beforeEach(() => {
+    controller = new SearchController(
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
   });
 
   it('should be defined', () => {
@@ -21,9 +21,6 @@ describe('SearchController', () => {
 describe('SearchController public-space-search gate', () => {
   function makeController(overrides: any = {}) {
     const searchService = { searchPage: jest.fn().mockResolvedValue([]) };
-    const environmentService = {
-      getSearchDriver: jest.fn().mockReturnValue('postgres'),
-    };
     const publicSpaceService = {
       getPublicSpace: jest
         .fn()
@@ -38,10 +35,8 @@ describe('SearchController public-space-search gate', () => {
     const controller = new SearchController(
       searchService as any,
       {} as any,
-      environmentService as any,
       publicSpaceService as any,
       pageRepo as any,
-      {} as any,
     );
     return { controller, searchService, publicSpaceService, pageRepo };
   }
@@ -84,7 +79,9 @@ describe('SearchController public-space-search gate', () => {
       'handbook',
       workspace,
     );
-    expect(pageRepo.getSpacePagesExcludingRestricted).toHaveBeenCalledWith('s1');
+    expect(pageRepo.getSpacePagesExcludingRestricted).toHaveBeenCalledWith(
+      's1',
+    );
     expect(searchService.searchPage).toHaveBeenCalledWith(
       { query: 'roadmap', spaceSlug: 'handbook' },
       { workspaceId: 'ws1', publicPageIds: ['p1', 'p2'] },

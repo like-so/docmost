@@ -23,6 +23,7 @@ import { FileInterceptor } from '../../common/interceptors/file.interceptor';
 import * as bytes from 'bytes';
 import * as path from 'path';
 import { ImportService } from './services/import.service';
+import { isImportMime } from './utils/file.utils';
 import { AuthWorkspace } from '../../common/decorators/auth-workspace.decorator';
 import { EnvironmentService } from '../environment/environment.service';
 import { AuditEvent, AuditResource } from '../../common/events/audit-events';
@@ -53,7 +54,8 @@ export class ImportController {
   ) {
     const validFileExtensions = ['.md', '.html', '.docx', '.pdf'];
 
-    const maxFileSize = bytes('30mb');
+    const importLimit = this.environmentService.getFileImportSizeLimit();
+    const maxFileSize = bytes(importLimit);
 
     let file = null;
     try {
@@ -64,7 +66,7 @@ export class ImportController {
       this.logger.error(err.message);
       if (err?.statusCode === 413) {
         throw new BadRequestException(
-          `File too large. Exceeds the 10mb import limit`,
+          `File too large. Exceeds the ${importLimit} import limit`,
         );
       }
     }
@@ -73,8 +75,10 @@ export class ImportController {
       throw new BadRequestException('Failed to upload file');
     }
 
+    const extension = path.extname(file.filename).toLowerCase();
     if (
-      !validFileExtensions.includes(path.extname(file.filename).toLowerCase())
+      !validFileExtensions.includes(extension) ||
+      !isImportMime(extension, file.mimetype)
     ) {
       throw new BadRequestException('Invalid import file type.');
     }
@@ -106,7 +110,7 @@ export class ImportController {
     };
 
     if (createdPage) {
-      this.auditService.log({
+      await this.auditService.log({
         event: AuditEvent.PAGE_CREATED,
         resourceType: AuditResource.PAGE,
         resourceId: createdPage.id,
@@ -177,7 +181,7 @@ export class ImportController {
       throw new ForbiddenException();
     }
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.PAGE_IMPORTED,
       resourceType: AuditResource.PAGE,
       resourceId: spaceId,

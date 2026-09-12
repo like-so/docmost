@@ -14,6 +14,13 @@ export type ResolvedAddress = { address: string; family: number };
 export type LookupFn = (hostname: string) => Promise<ResolvedAddress[]>;
 export type PinnedAddress = { hostname: string; address: string; family: 4 | 6 };
 
+export type OutboundValidationOptions = {
+  requireHttps?: boolean;
+  privateHostnames?: readonly string[];
+  allowPrivateNetworks?: boolean;
+  port?: number;
+};
+
 /** A rejected URL. Only transient resolution failures are retryable. */
 export class OutboundUrlError extends Error {
   constructor(
@@ -108,14 +115,22 @@ function findRefusal(
   resolved: ResolvedAddress[],
   port: number,
   policy: OutboundNetworkPolicy,
+  privateHostAllowed: boolean,
+  allowPrivateNetworks: boolean,
 ): Refusal | undefined {
   for (const { address } of resolved) {
     // Reject invalid resolver output before policy checks.
     if (!isIPv4(address) && !isIPv6(address)) return { address, kind: 'not-an-ip' };
     if (isHardBlockedAddress(address)) return { address, kind: 'hard-blocked' };
-    if (policyNamesAddress(policy, address, port)) continue;
     if (isPrivateNetworkAddress(address)) {
-      if (policy.mode === 'all') continue;
+      if (
+        privateHostAllowed ||
+        (allowPrivateNetworks &&
+          (policyNamesAddress(policy, address, port) ||
+            policy.mode === 'all'))
+      ) {
+        continue;
+      }
       return { address, kind: 'private' };
     }
     if (isAlwaysBlockedAddress(address)) return { address, kind: 'reserved' };
@@ -169,7 +184,10 @@ export class OutboundUrlGuard {
   }
 
   /** Validates the URL and returns the address used to pin the connection. */
-  async validate(rawUrl: string): Promise<PinnedAddress> {
+  async validate(
+    rawUrl: string,
+    options: OutboundValidationOptions = {},
+  ): Promise<PinnedAddress> {
     let url: URL;
     try {
       url = new URL(rawUrl);
@@ -181,7 +199,7 @@ export class OutboundUrlGuard {
     if (url.protocol !== 'https:' && url.protocol !== 'http:') {
       throw new OutboundUrlError('Destination URL must use http or https');
     }
-    if (isCloud && url.protocol !== 'https:') {
+    if ((isCloud || options.requireHttps) && url.protocol !== 'https:') {
       throw new OutboundUrlError('Destination URL must use https');
     }
     if (url.username || url.password) {
@@ -219,13 +237,27 @@ export class OutboundUrlGuard {
     } else {
       const refusal = findRefusal(
         resolved,
-        effectivePort(url),
+        options.port ?? effectivePort(url),
         this.resolvePolicy(),
+        this.allowsPrivateHostname(options.privateHostnames, hostname),
+        options.allowPrivateNetworks ?? true,
       );
       if (refusal) throw new OutboundUrlError(describeRefusal(hostname, refusal));
     }
 
     const pick = resolved[0];
     return { hostname, address: pick.address, family: pick.family === 6 ? 6 : 4 };
+  }
+
+  private allowsPrivateHostname(
+    allowed: readonly string[] | undefined,
+    hostname: string,
+  ): boolean {
+    const normalized = hostname.toLowerCase().replace(/\.$/, '');
+    return (
+      allowed?.some(
+        (value) => value.toLowerCase().replace(/\.$/, '') === normalized,
+      ) ?? false
+    );
   }
 }

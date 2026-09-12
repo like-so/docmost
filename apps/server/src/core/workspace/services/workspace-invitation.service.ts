@@ -201,7 +201,7 @@ export class WorkspaceInvitationService {
 
       // Audit log for each invitation created
       for (const invitation of invites) {
-        this.auditService.log({
+        await this.auditService.log({
           event: AuditEvent.WORKSPACE_INVITE_CREATED,
           resourceType: AuditResource.WORKSPACE_INVITATION,
           resourceId: invitation.id,
@@ -333,7 +333,7 @@ export class WorkspaceInvitationService {
       });
     }
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.USER_CREATED,
       resourceType: AuditResource.USER,
       resourceId: newUser.id,
@@ -394,7 +394,7 @@ export class WorkspaceInvitationService {
       workspace.hostname,
     );
 
-    this.auditService.log({
+    await this.auditService.log({
       event: AuditEvent.WORKSPACE_INVITE_RESENT,
       resourceType: AuditResource.WORKSPACE_INVITATION,
       resourceId: invitation.id,
@@ -423,7 +423,7 @@ export class WorkspaceInvitationService {
       .execute();
 
     if (invitation) {
-      this.auditService.log({
+      await this.auditService.log({
         event: AuditEvent.WORKSPACE_INVITE_REVOKED,
         resourceType: AuditResource.WORKSPACE_INVITATION,
         resourceId: invitation.id,

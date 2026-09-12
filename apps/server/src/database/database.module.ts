@@ -1,6 +1,7 @@
 import { Global, Logger, Module, OnApplicationBootstrap } from '@nestjs/common';
 import { InjectKysely, KyselyModule } from 'nestjs-kysely';
 import { EnvironmentService } from '../integrations/environment/environment.service';
+import { EnvironmentModule } from '../integrations/environment/environment.module';
 import { CamelCasePlugin, LogEvent, sql } from 'kysely';
 import { GroupRepo } from '@docmost/db/repos/group/group.repo';
 import { WorkspaceRepo } from '@docmost/db/repos/workspace/workspace.repo';
@@ -28,6 +29,10 @@ import { WatcherRepo } from '@docmost/db/repos/watcher/watcher.repo';
 import { LabelRepo } from '@docmost/db/repos/label/label.repo';
 import { FavoriteRepo } from '@docmost/db/repos/favorite/favorite.repo';
 import { TemplateRepo } from '@docmost/db/repos/template/template.repo';
+import { AuthProviderRepo } from '@docmost/db/repos/auth-provider/auth-provider.repo';
+import { AuditRepo } from '@docmost/db/repos/audit/audit.repo';
+import { SiemOutboxRepo } from '@docmost/db/repos/siem/siem-outbox.repo';
+import { ApiKeyRepo } from '@docmost/db/repos/api-key/api-key.repo';
 import { PageListener } from '@docmost/db/listeners/page.listener';
 import { PostgresJSDialect } from 'kysely-postgres-js';
 import * as postgres from 'postgres';
@@ -36,8 +41,9 @@ import { normalizePostgresUrl } from '../common/helpers';
 @Global()
 @Module({
   imports: [
+    EnvironmentModule,
     KyselyModule.forRootAsync({
-      imports: [],
+      imports: [EnvironmentModule],
       inject: [EnvironmentService],
       useFactory: (environmentService: EnvironmentService) => ({
         dialect: new PostgresJSDialect({
@@ -94,6 +100,10 @@ import { normalizePostgresUrl } from '../common/helpers';
     WatcherRepo,
     LabelRepo,
     TemplateRepo,
+    AuthProviderRepo,
+    AuditRepo,
+    SiemOutboxRepo,
+    ApiKeyRepo,
     PageListener,
   ],
   exports: [
@@ -120,6 +130,10 @@ import { normalizePostgresUrl } from '../common/helpers';
     WatcherRepo,
     LabelRepo,
     TemplateRepo,
+    AuthProviderRepo,
+    AuditRepo,
+    SiemOutboxRepo,
+    ApiKeyRepo,
   ],
 })
 export class DatabaseModule implements OnApplicationBootstrap {

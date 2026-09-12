@@ -4,6 +4,8 @@ import { SearchResponseDto } from './dto/search-response.dto';
 import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB } from '@docmost/db/types/kysely.types';
 import { sql } from 'kysely';
+import { jsonObjectFrom } from 'kysely/helpers/postgres';
+import { AttachmentType } from '../attachment/attachment.constants';
 import { PageRepo } from '@docmost/db/repos/page/page.repo';
 import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
 import { ShareRepo } from '@docmost/db/repos/share/share.repo';
@@ -214,6 +216,87 @@ export class SearchService {
     });
 
     return { items: searchResults };
+  }
+
+  async searchAttachments(
+    searchParams: SearchDTO,
+    opts: { userId: string; workspaceId: string },
+  ): Promise<{ items: unknown[] }> {
+    const query = searchParams.query?.trim() ?? '';
+    if (!query) {
+      return { items: [] };
+    }
+
+    const searchQuery = tsquery(query + '*');
+    let results: any[] = await this.db
+      .selectFrom('attachments')
+      .innerJoin('pages', 'pages.id', 'attachments.pageId')
+      .select([
+        'attachments.id',
+        'attachments.fileName',
+        'attachments.pageId',
+        'attachments.creatorId',
+        'attachments.createdAt',
+        'attachments.updatedAt',
+        sql<number>`ts_rank(attachments.tsv, to_tsquery('english', f_unaccent(${searchQuery})))`.as(
+          'rank',
+        ),
+        sql<string>`ts_headline('english', attachments.text_content, to_tsquery('english', f_unaccent(${searchQuery})),'MinWords=9, MaxWords=10, MaxFragments=3')`.as(
+          'highlight',
+        ),
+      ])
+      .select((eb) =>
+        jsonObjectFrom(
+          eb
+            .selectFrom('spaces')
+            .select(['spaces.id', 'spaces.name', 'spaces.slug', 'spaces.logo'])
+            .whereRef('spaces.id', '=', 'attachments.spaceId'),
+        ).as('space'),
+      )
+      .select((eb) =>
+        jsonObjectFrom(
+          eb
+            .selectFrom('pages as attachmentPage')
+            .select([
+              'attachmentPage.id',
+              'attachmentPage.title',
+              'attachmentPage.slugId',
+            ])
+            .whereRef('attachmentPage.id', '=', 'attachments.pageId'),
+        ).as('page'),
+      )
+      .where(
+        'attachments.tsv',
+        '@@',
+        sql<string>`to_tsquery('english', f_unaccent(${searchQuery}))`,
+      )
+      .where('attachments.workspaceId', '=', opts.workspaceId)
+      .where('attachments.type', '=', AttachmentType.File)
+      .where('attachments.deletedAt', 'is', null)
+      .where('pages.deletedAt', 'is', null)
+      .where(
+        'attachments.spaceId',
+        'in',
+        this.spaceMemberRepo.getUserSpaceIdsQuery(opts.userId),
+      )
+      .$if(Boolean(searchParams.spaceId), (qb) =>
+        qb.where('attachments.spaceId', '=', searchParams.spaceId),
+      )
+      .orderBy('rank', 'desc')
+      .limit(searchParams.limit || 25)
+      .offset(searchParams.offset || 0)
+      .execute();
+
+    const pageIds = results.map((result) => result.pageId);
+    const accessibleIds = await this.pagePermissionRepo.filterAccessiblePageIds({
+      pageIds,
+      userId: opts.userId,
+      spaceId: searchParams.spaceId,
+    });
+    const accessibleSet = new Set(accessibleIds);
+    results = results.filter((result) => accessibleSet.has(result.pageId));
+
+    return { items: results };
   }
 
   async searchSuggestions(

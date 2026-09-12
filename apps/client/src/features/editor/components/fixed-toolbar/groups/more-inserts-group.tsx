@@ -33,9 +33,6 @@ import {
 } from "@/components/icons";
 import { useTranslation } from "react-i18next";
 import { insertBaseEmbedBlock } from "@/features/editor/components/base-embed/insert-base-embed";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
-import { useUpgradeLabel } from "@/ee/hooks/use-upgrade-label";
 
 interface Props {
   editor: Editor;
@@ -44,8 +41,8 @@ interface Props {
 
 export const MoreInsertsGroup: FC<Props> = ({ editor, templateMode }) => {
   const { t, i18n } = useTranslation();
-  const hasBases = useHasFeature(Feature.BASES);
-  const upgradeLabel = useUpgradeLabel();
+  const hasBases = true;
+  const upgradeLabel = "";
 
   const setEmbed = (provider: string) =>
     editor.chain().focus().setEmbed({ provider }).run();

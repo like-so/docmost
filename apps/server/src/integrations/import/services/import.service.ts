@@ -15,6 +15,7 @@ import {
   createByteCountingStream,
 } from '../../../common/helpers';
 import { generateJitteredKeyBetween } from 'fractional-indexing-jittered';
+import { v7 as uuid7 } from 'uuid';
 import { TiptapTransformer } from '@hocuspocus/transformer';
 import * as Y from 'yjs';
 import { markdownToHtml } from '@docmost/editor-ext';
@@ -23,14 +24,14 @@ import {
   FileTaskType,
   getFileTaskFolderPath,
 } from '../utils/file.utils';
-import { v7 as uuid7 } from 'uuid';
 import { StorageService } from '../../storage/storage.service';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { QueueJob, QueueName } from '../../queue/constants';
-import { ModuleRef } from '@nestjs/core';
 import { load } from 'cheerio';
 import { normalizeImportHtml } from '../utils/import-formatter';
+import * as mammoth from 'mammoth';
+import { extractPagesMarkdown } from '@docmost/pdf-inspector';
 
 @Injectable()
 export class ImportService {
@@ -42,7 +43,6 @@ export class ImportService {
     @InjectKysely() private readonly db: KyselyDB,
     @InjectQueue(QueueName.FILE_TASK_QUEUE)
     private readonly fileTaskQueue: Queue,
-    private moduleRef: ModuleRef,
   ) {}
 
   async importPage(
@@ -62,33 +62,15 @@ export class ImportService {
     let prosemirrorState = null;
     let createdPage = null;
 
-    // For DOCX, we need the page ID upfront so images can reference it
-    const pageId =
-      fileExtension === '.docx' || fileExtension === '.pdf'
-        ? uuid7()
-        : undefined;
-
     try {
       if (fileExtension.endsWith('.md')) {
         prosemirrorState = await this.processMarkdown(fileContent);
       } else if (fileExtension.endsWith('.html')) {
         prosemirrorState = await this.processHTML(fileContent);
       } else if (fileExtension.endsWith('.docx')) {
-        prosemirrorState = await this.processDocx(
-          fileBuffer,
-          workspaceId,
-          spaceId,
-          pageId,
-          userId,
-        );
+        prosemirrorState = await this.processDocx(fileBuffer);
       } else if (fileExtension.endsWith('.pdf')) {
-        prosemirrorState = await this.processPdf(
-          fileBuffer,
-          workspaceId,
-          spaceId,
-          pageId,
-          userId,
-        );
+        prosemirrorState = await this.processPdf(fileBuffer);
       }
     } catch (err) {
       const message = 'Error processing file content';
@@ -114,7 +96,6 @@ export class ImportService {
         const pagePosition = await this.getNewPagePosition(spaceId);
 
         createdPage = await this.pageRepo.insertPage({
-          ...(pageId ? { id: pageId } : {}),
           slugId: generateSlugId(),
           title: pageTitle,
           content: prosemirrorJson,
@@ -159,76 +140,18 @@ export class ImportService {
     }
   }
 
-  async processDocx(
-    fileBuffer: Buffer,
-    workspaceId: string,
-    spaceId: string,
-    pageId: string,
-    userId: string,
-  ): Promise<any> {
-    let DocxImportModule: any;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      DocxImportModule = require('./../../../ee/document-import/docx-import.service');
-    } catch (err) {
-      this.logger.error(
-        'DOCX import requested but EE module not bundled in this build',
-      );
-      throw new BadRequestException(
-        'This feature requires a valid enterprise license.',
-      );
-    }
-
-    const docxImportService = this.moduleRef.get(
-      DocxImportModule.DocxImportService,
-      { strict: false },
-    );
-
-    const html = await docxImportService.convertDocxToHtml(
-      fileBuffer,
-      workspaceId,
-      spaceId,
-      pageId,
-      userId,
-    );
-
-    return this.processHTML(html);
+  async processDocx(fileBuffer: Buffer): Promise<any> {
+    const result = await mammoth.convertToHtml({ buffer: fileBuffer });
+    return this.processHTML(result.value);
   }
 
-  async processPdf(
-    fileBuffer: Buffer,
-    workspaceId: string,
-    spaceId: string,
-    pageId: string,
-    userId: string,
-  ): Promise<any> {
-    let PdfImportModule: any;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      PdfImportModule = require('./../../../ee/document-import/pdf-import.service');
-    } catch (err) {
-      this.logger.error(
-        'PDF import requested but EE module not bundled in this build',
-      );
-      throw new BadRequestException(
-        'This feature requires a valid enterprise license.',
-      );
+  async processPdf(fileBuffer: Buffer): Promise<any> {
+    const result = extractPagesMarkdown(fileBuffer);
+    const markdown = result.pages.map((page) => page.markdown).join('\n\n');
+    if (!markdown.trim()) {
+      throw new BadRequestException('PDF does not contain extractable text');
     }
-
-    const pdfImportService = this.moduleRef.get(
-      PdfImportModule.PdfImportService,
-      { strict: false },
-    );
-
-    const html = await pdfImportService.convertPdfToHtml(
-      fileBuffer,
-      workspaceId,
-      spaceId,
-      pageId,
-      userId,
-    );
-
-    return this.processHTML(html);
+    return this.processMarkdown(markdown);
   }
 
   async createYdoc(prosemirrorJson: any): Promise<Buffer | null> {

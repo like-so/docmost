@@ -2,12 +2,10 @@ import { NodeViewWrapper, NodeViewProps } from "@tiptap/react";
 import { ActionIcon, Box, Menu, Text } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { BaseView } from "@/ee/base/components/base-view";
-import { BaseTableSkeleton } from "@/ee/base/components/base-table-skeleton";
-import { useBaseQuery } from "@/ee/base/queries/base-query";
+import { BaseView } from "@/features/base/components/base-view";
+import { BaseTableSkeleton } from "@/features/base/components/base-table-skeleton";
+import { useBaseQuery } from "@/features/base/queries/base-query";
 import { pinOffsetWatcher } from "@docmost/editor-ext";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
 import { IconDots, IconTable, IconX } from "@tabler/icons-react";
 import { usePageQuery } from "@/features/page/queries/page-query";
 import classes from "./base-embed.module.css";
@@ -55,7 +53,6 @@ export function BaseEmbedView({ node, editor, deleteNode }: NodeViewProps) {
   const pageId = node.attrs.pageId as string | null;
   const pendingKey = node.attrs.pendingKey as string | null;
   const wrapperRef = useRef<HTMLDivElement | null>(null);
-  const hasBases = useHasFeature(Feature.BASES);
   const [menuOpen, setMenuOpen] = useState(false);
   // Suppress the query while the slash command awaits the server-assigned
   // pageId; useBaseQuery would otherwise fire with an empty key.
@@ -132,7 +129,7 @@ export function BaseEmbedView({ node, editor, deleteNode }: NodeViewProps) {
       <BaseView
         pageId={pageId}
         embedded
-        editable={hasBases && editor.isEditable && (base?.permissions?.canEdit ?? false)}
+        editable={editor.isEditable && (base?.permissions?.canEdit ?? false)}
       />
     );
   }

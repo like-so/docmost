@@ -5,11 +5,13 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { WorkspaceModule } from '../workspace/workspace.module';
 import { SignupService } from './services/signup.service';
 import { TokenModule } from './token.module';
+import { ProvisioningModule } from '../../provisioning/provisioning.module';
+import { MfaController } from '../../provisioning/mfa.controller';
 
 @Module({
-  imports: [TokenModule, WorkspaceModule],
-  controllers: [AuthController],
+  imports: [TokenModule, WorkspaceModule, ProvisioningModule],
+  controllers: [AuthController, MfaController],
   providers: [AuthService, SignupService, JwtStrategy],
-  exports: [SignupService],
+  exports: [AuthService, SignupService],
 })
 export class AuthModule {}

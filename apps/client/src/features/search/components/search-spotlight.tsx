@@ -1,22 +1,23 @@
 import { Spotlight } from "@mantine/spotlight";
 import { IconSearch, IconSparkles } from "@tabler/icons-react";
 import { Group, Button, VisuallyHidden, Text } from "@mantine/core";
-import React, { useState, useMemo, useEffect, useCallback } from "react";
+import React, {
+  useState,
+  useMemo,
+  useEffect,
+  useCallback,
+  useRef,
+} from "react";
 import { useDebouncedValue } from "@mantine/hooks";
 import { useTranslation } from "react-i18next";
 import { notifications } from "@mantine/notifications";
 import { searchSpotlightStore } from "../constants.ts";
 import { SearchSpotlightFilters } from "./search-spotlight-filters.tsx";
 import { useUnifiedSearch } from "../hooks/use-unified-search.ts";
-import { useAiSearch } from "../../../ee/ai/hooks/use-ai-search.ts";
 import { SearchResultItem } from "./search-result-item.tsx";
-import { AiSearchResult } from "../../../ee/ai/components/ai-search-result.tsx";
-import { useHasFeature } from "@/ee/hooks/use-feature";
-import { Feature } from "@/ee/features";
 import { useAtomValue } from "jotai";
 import { workspaceAtom } from "@/features/user/atoms/current-user-atom.ts";
-import { hintVectorCache } from "@/ee/ai/services/ai-search-service.ts";
-import { getAiVectorDriver } from "@/lib/config.ts";
+import { semanticSearch } from "@/features/ai/services/ai-service";
 
 interface SearchSpotlightProps {
   spaceId?: string;
@@ -24,8 +25,7 @@ interface SearchSpotlightProps {
 export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
   const workspace = useAtomValue(workspaceAtom);
   const { t } = useTranslation();
-  const hasAiFeature = useHasFeature(Feature.AI);
-  const hasAttachmentIndexing = useHasFeature(Feature.ATTACHMENT_INDEXING);
+  const hasAiFeature = workspace?.settings?.ai?.search === true;
   const [query, setQuery] = useState("");
   const [debouncedSearchQuery] = useDebouncedValue(query, 300);
   const [filters, setFilters] = useState<{
@@ -66,42 +66,32 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
     return params;
   }, [debouncedSearchQuery, filters]);
 
-  const {
-    data: searchResults,
-    isFetching,
-  } = useUnifiedSearch(
+  const { data: searchResults, isFetching } = useUnifiedSearch(
     searchParams,
-    !isAiMode // Disable regular search when in AI mode
+    !isAiMode, // Disable regular search when in AI mode
   );
-  const {
-    //@ts-ignore
-    data: aiSearchResult,
-    //@ts-ignore
-    isPending: isAiLoading,
-    //@ts-ignore
-    mutate: triggerAiSearchMutation,
-    //@ts-ignore
-    reset: resetAiMutation,
-    //@ts-ignore
-    error: aiSearchError,
-    streamingAnswer,
-    streamingSources,
-    clearStreaming,
-  } = useAiSearch();
+  const [aiSearchResult, setAiSearchResult] = useState<any>();
+  const [isAiLoading, setAiLoading] = useState(false);
+  const [aiSearchError, setAiSearchError] = useState<Error>();
+  const aiRequestId = useRef(0);
 
-  // Clear streaming state and mutation data when query changes (user is typing a new query)
-  useEffect(() => {
-    clearStreaming();
-    resetAiMutation();
-  }, [query, clearStreaming, resetAiMutation]);
+  const handleQueryChange = (nextQuery: string) => {
+    if (nextQuery === query) return;
+    aiRequestId.current += 1;
+    setQuery(nextQuery);
+    setAiSearchResult(undefined);
+    setAiSearchError(undefined);
+    setAiLoading(false);
+  };
 
   // Show error notification when AI search fails
   useEffect(() => {
     if (aiSearchError) {
       notifications.show({
-        message: aiSearchError.message || t("AI search failed. Please try again."),
+        message:
+          aiSearchError.message || t("AI search failed. Please try again."),
         color: "red",
-        position: "top-center"
+        position: "top-center",
       });
     }
   }, [aiSearchError, t]);
@@ -112,8 +102,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
   const isQuerySettled = query === debouncedSearchQuery;
 
   // Determine result type for rendering
-  const isAttachmentSearch =
-    filters.contentType === "attachment" && hasAttachmentIndexing;
+  const isAttachmentSearch = filters.contentType === "attachment";
 
   const resultItems = (searchResults || []).map((result) => (
     <SearchResultItem
@@ -124,18 +113,12 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
     />
   ));
 
-  const handleSpotlightOpen = () => {
-    if (
-      workspace?.settings?.ai?.search === true &&
-      getAiVectorDriver() === "turbopuffer"
-    ) {
-      hintVectorCache();
-    }
-  };
-
-  const handleFiltersChange = useCallback((newFilters: any) => {
-    setFilters(newFilters);
-  }, [setFilters]);
+  const handleFiltersChange = useCallback(
+    (newFilters: any) => {
+      setFilters(newFilters);
+    },
+    [setFilters],
+  );
 
   const handleAskClick = () => {
     setIsAiMode(!isAiMode);
@@ -143,7 +126,20 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
 
   const handleAiSearchTrigger = () => {
     if (query.trim() && isAiMode) {
-      triggerAiSearchMutation(searchParams);
+      const requestId = ++aiRequestId.current;
+      setAiLoading(true);
+      semanticSearch(query, filters.spaceId || undefined)
+        .then((result) => {
+          if (aiRequestId.current === requestId) setAiSearchResult(result);
+        })
+        .catch(() => {
+          if (aiRequestId.current === requestId) {
+            setAiSearchError(new Error("AI search failed"));
+          }
+        })
+        .finally(() => {
+          if (aiRequestId.current === requestId) setAiLoading(false);
+        });
     }
   };
 
@@ -152,10 +148,9 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
       <Spotlight.Root
         size="xl"
         maxHeight={600}
-        onSpotlightOpen={handleSpotlightOpen}
         store={searchSpotlightStore}
         query={query}
-        onQueryChange={setQuery}
+        onQueryChange={handleQueryChange}
         scrollable
         overlayProps={{
           backgroundOpacity: 0.55,
@@ -168,7 +163,12 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
             leftSection={<IconSearch size={20} stroke={1.5} />}
             style={{ flex: 1 }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && isAiMode && query.trim() && !isAiLoading) {
+              if (
+                e.key === "Enter" &&
+                isAiMode &&
+                query.trim() &&
+                !isAiLoading
+              ) {
                 e.preventDefault();
                 handleAiSearchTrigger();
               }
@@ -218,23 +218,33 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
               {query.length === 0 && (
                 <Spotlight.Empty>{t("Ask a question...")}</Spotlight.Empty>
               )}
-              {query.length > 0 && (isAiLoading || aiSearchResult || streamingAnswer) && (
-                <AiSearchResult
-                  result={aiSearchResult}
-                  isLoading={isAiLoading}
-                  streamingAnswer={streamingAnswer}
-                  streamingSources={streamingSources}
-                />
-              )}
+              {query.length > 0 &&
+                (isAiLoading || aiSearchResult) &&
+                (isAiLoading ? (
+                  <Spotlight.Empty>{t("Searching...")}</Spotlight.Empty>
+                ) : (
+                  aiSearchResult?.items?.map((result: any) => (
+                    <SearchResultItem
+                      key={result.id}
+                      result={result}
+                      isAttachmentResult={false}
+                      showSpace={!filters.spaceId}
+                    />
+                  ))
+                ))}
               {query.length > 0 && !isAiLoading && !aiSearchResult && (
                 <Spotlight.Empty>{t("No answer available")}</Spotlight.Empty>
               )}
             </>
           ) : (
             <>
-              {query.length === 0 && !isFilterBrowse && resultItems.length === 0 && (
-                <Spotlight.Empty>{t("Start typing to search...")}</Spotlight.Empty>
-              )}
+              {query.length === 0 &&
+                !isFilterBrowse &&
+                resultItems.length === 0 && (
+                  <Spotlight.Empty>
+                    {t("Start typing to search...")}
+                  </Spotlight.Empty>
+                )}
 
               {(query.length > 0 || isFilterBrowse) &&
                 !isFetching &&
@@ -248,12 +258,12 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
               {(query.length > 0 || isFilterBrowse) &&
                 isFetching &&
                 resultItems.length === 0 && (
-                <Spotlight.Empty>
-                  <Text size="sm" style={{ marginTop: 10 }}>
-                    {t("Searching...")}
-                  </Text>
-                </Spotlight.Empty>
-              )}
+                  <Spotlight.Empty>
+                    <Text size="sm" style={{ marginTop: 10 }}>
+                      {t("Searching...")}
+                    </Text>
+                  </Spotlight.Empty>
+                )}
             </>
           )}
         </Spotlight.ActionsList>

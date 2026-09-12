@@ -1,0 +1,6 @@
+import { MantineProvider } from "@mantine/core"; import { fireEvent, render, screen } from "@testing-library/react"; import { describe, expect, it, vi } from "vitest";
+const updateWorkspace=vi.hoisted(()=>vi.fn().mockResolvedValue({})); const set=vi.hoisted(()=>vi.fn());
+vi.mock("jotai", async (importOriginal) => ({ ...(await importOriginal<typeof import("jotai")>()), useAtom: () => [{ settings: {} }, set] })); vi.mock("@/features/workspace/services/workspace-service.ts",()=>({updateWorkspace})); vi.mock("@/main.tsx",()=>({queryClient:{setQueryData:vi.fn(),invalidateQueries:vi.fn()}})); vi.mock("@mantine/notifications",()=>({notifications:{show:vi.fn()}}));
+import { WorkspaceCapability } from "./workspace-capabilities";
+if(!window.matchMedia) Object.defineProperty(window,"matchMedia",{value:()=>({addEventListener:()=>undefined,removeEventListener:()=>undefined})});
+describe("WorkspaceCapability",()=>{it.each([["templates","Templates",{allowMemberTemplates:true}],["spaces","Personal spaces",{allowPersonalSpaces:true}]])("sends %s capability payload",async(setting,title,payload)=>{render(<MantineProvider><WorkspaceCapability setting={setting as any} title={title} description="description"/></MantineProvider>);fireEvent.click(screen.getByRole("switch",{name:title}));expect(updateWorkspace).toHaveBeenCalledWith(payload);});});

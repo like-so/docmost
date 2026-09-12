@@ -1,6 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { Agent, Dispatcher } from 'undici';
-import { OutboundUrlGuard } from './outbound-url.guard';
+import {
+  OutboundUrlGuard,
+  OutboundValidationOptions,
+  PinnedAddress,
+} from './outbound-url.guard';
 
 export const OUTBOUND_REQUEST_TIMEOUT_MS = 10_000;
 
@@ -15,30 +19,40 @@ export type AgentLease = {
 };
 
 export type IOutboundAgentFactory = {
-  lease(url: string, tls?: OutboundTlsOptions): Promise<AgentLease>;
+  lease(
+    url: string,
+    tls?: OutboundTlsOptions,
+    validation?: OutboundValidationOptions,
+  ): Promise<AgentLease>;
 };
+
+export function createPinnedLookup(pinned: PinnedAddress) {
+  return (_hostname: string, options: any, callback: any) => {
+    if (options?.all) {
+      callback(null, [{ address: pinned.address, family: pinned.family }]);
+    } else {
+      callback(null, pinned.address, pinned.family);
+    }
+  };
+}
 
 /** Creates a per-request agent pinned to the address validated by the SSRF guard. */
 @Injectable()
 export class OutboundAgentFactory implements IOutboundAgentFactory {
   constructor(private readonly urlGuard: OutboundUrlGuard) {}
 
-  async lease(url: string, tls?: OutboundTlsOptions): Promise<AgentLease> {
-    const pinned = await this.urlGuard.validate(url);
-
-    const lookup = (_hostname: string, options: any, callback: any) => {
-      if (options?.all) {
-        callback(null, [{ address: pinned.address, family: pinned.family }]);
-      } else {
-        callback(null, pinned.address, pinned.family);
-      }
-    };
+  async lease(
+    url: string,
+    tls?: OutboundTlsOptions,
+    validation?: OutboundValidationOptions,
+  ): Promise<AgentLease> {
+    const pinned = await this.urlGuard.validate(url, validation);
 
     const agent = new Agent({
       connect: {
         ca: tls?.caCert || undefined,
         rejectUnauthorized: tls?.rejectUnauthorized ?? true,
-        lookup: lookup as any,
+        lookup: createPinnedLookup(pinned) as any,
         timeout: OUTBOUND_REQUEST_TIMEOUT_MS,
       },
       headersTimeout: OUTBOUND_REQUEST_TIMEOUT_MS,

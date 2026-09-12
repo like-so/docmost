@@ -35,6 +35,7 @@ import {
 } from '../casl/interfaces/workspace-ability.type';
 import WorkspaceAbilityFactory from '../casl/abilities/workspace-ability.factory';
 import { CreateSpaceDto } from './dto/create-space.dto';
+import { isVisiblePersonalSpace } from '../personal-space/personal-space.policy';
 
 @UseGuards(JwtAuthGuard)
 @Controller('spaces')
@@ -54,10 +55,15 @@ export class SpaceController {
     @Body()
     pagination: PaginationOptions,
     @AuthUser() user: User,
+    @AuthWorkspace() workspace: Workspace,
   ) {
     const result = await this.spaceMemberService.getUserSpaces(
       user.id,
       pagination,
+    );
+
+    result.items = result.items.filter((space) =>
+      isVisiblePersonalSpace(space, workspace),
     );
 
     if (result.items.length > 0) {
@@ -221,6 +227,7 @@ export class SpaceController {
       throw new BadRequestException('userIds or groupIds is required');
     }
 
+    await this.ensureNonPersonal(dto.spaceId, workspace.id);
     const ability = await this.spaceAbility.createForUser(user, dto.spaceId);
     if (ability.cannot(SpaceCaslAction.Manage, SpaceCaslSubject.Member)) {
       throw new ForbiddenException();
@@ -242,6 +249,7 @@ export class SpaceController {
   ) {
     this.validateIds(dto);
 
+    await this.ensureNonPersonal(dto.spaceId, workspace.id);
     const ability = await this.spaceAbility.createForUser(user, dto.spaceId);
     if (ability.cannot(SpaceCaslAction.Manage, SpaceCaslSubject.Member)) {
       throw new ForbiddenException();
@@ -259,12 +267,19 @@ export class SpaceController {
   ) {
     this.validateIds(dto);
 
+    await this.ensureNonPersonal(dto.spaceId, workspace.id);
     const ability = await this.spaceAbility.createForUser(user, dto.spaceId);
     if (ability.cannot(SpaceCaslAction.Manage, SpaceCaslSubject.Member)) {
       throw new ForbiddenException();
     }
 
     return this.spaceMemberService.updateSpaceMemberRole(dto, workspace.id);
+  }
+
+  private async ensureNonPersonal(spaceId: string, workspaceId: string) {
+    const space = await this.spaceService.getSpaceInfo(spaceId, workspaceId);
+    if (space.isPersonal)
+      throw new ForbiddenException('Personal space membership is immutable');
   }
 
   validateIds(dto: RemoveSpaceMemberDto | UpdateSpaceMemberRoleDto) {
