@@ -16,13 +16,7 @@ import {
   type ApiKey,
 } from "@/features/api-key/services/api-key-service";
 import SettingsTitle from "@/components/settings/settings-title";
-
-function getDefaultExpiration() {
-  const date = new Date();
-  date.setDate(date.getDate() + 90);
-  const localTime = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return localTime.toISOString().slice(0, 16);
-}
+import { getDefaultExpiration } from "./api-keys.utils";
 
 function PersonalKey({
   apiKey,
@@ -66,11 +60,17 @@ function PersonalKey({
   );
 }
 
-export default function ApiKeys() {
+export default function ApiKeys({
+  now = () => new Date(),
+}: {
+  now?: () => Date;
+}) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [name, setName] = useState("");
   const [scopes, setScopes] = useState<string[]>(["read"]);
-  const [expiresAt, setExpiresAt] = useState(getDefaultExpiration);
+  const [expiresAt, setExpiresAt] = useState(() =>
+    getDefaultExpiration(now()),
+  );
   const [token, setToken] = useState<string>();
   const refresh = async () => setKeys(await listApiKeys());
 
@@ -89,7 +89,7 @@ export default function ApiKeys() {
     setToken(result.token);
     setName("");
     setScopes(["read"]);
-    setExpiresAt(getDefaultExpiration());
+    setExpiresAt(getDefaultExpiration(now()));
     await refresh();
   }
 

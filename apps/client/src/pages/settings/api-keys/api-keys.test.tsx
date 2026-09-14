@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ApiKeys from "./api-keys";
 import ApiKeyManagement from "./api-key-management";
+import { getDefaultExpiration } from "./api-keys.utils";
 
 const service = vi.hoisted(() => ({
   listApiKeys: vi.fn(), listWorkspaceApiKeys: vi.fn(),
@@ -24,16 +25,10 @@ beforeEach(() => {
 });
 describe("API key initial loading and mutations", () => {
   it("loads personal keys and refreshes after rename, create and revoke", async () => {
-    const expectedExpiration = new Date();
-    expectedExpiration.setDate(expectedExpiration.getDate() + 90);
-    const expectedLocalExpiration = new Date(
-      expectedExpiration.getTime() -
-        expectedExpiration.getTimezoneOffset() * 60_000,
-    )
-      .toISOString()
-      .slice(0, 16);
+    const now = new Date(2026, 8, 14, 18, 20);
+    const expectedLocalExpiration = "2026-12-14T18:20";
 
-    show(<ApiKeys />);
+    show(<ApiKeys now={() => now} />);
     expect((screen.getByLabelText("Expires at") as HTMLInputElement).value).toBe(
       expectedLocalExpiration,
     );
@@ -47,6 +42,9 @@ describe("API key initial loading and mutations", () => {
     expect(service.createApiKey).toHaveBeenCalledWith(
       "New key",
       ["read"],
+      expectedLocalExpiration,
+    );
+    expect((screen.getByLabelText("Expires at") as HTMLInputElement).value).toBe(
       expectedLocalExpiration,
     );
     fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
@@ -67,5 +65,22 @@ describe("API key initial loading and mutations", () => {
     fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(service.revokeWorkspaceApiKey).toHaveBeenCalledWith("workspace"));
     await waitFor(() => expect(service.listWorkspaceApiKeys).toHaveBeenCalledTimes(3));
+  });
+});
+
+describe("getDefaultExpiration", () => {
+  it("adds three calendar months without changing the day", () => {
+    expect(getDefaultExpiration(new Date(2026, 8, 14, 18, 20))).toBe(
+      "2026-12-14T18:20",
+    );
+  });
+
+  it("clamps to the final day of a shorter target month", () => {
+    expect(getDefaultExpiration(new Date(2026, 0, 31, 10, 30))).toBe(
+      "2026-04-30T10:30",
+    );
+    expect(getDefaultExpiration(new Date(2023, 10, 30, 10, 30))).toBe(
+      "2024-02-29T10:30",
+    );
   });
 });
