@@ -24,7 +24,19 @@ beforeEach(() => {
 });
 describe("API key initial loading and mutations", () => {
   it("loads personal keys and refreshes after rename, create and revoke", async () => {
+    const expectedExpiration = new Date();
+    expectedExpiration.setDate(expectedExpiration.getDate() + 90);
+    const expectedLocalExpiration = new Date(
+      expectedExpiration.getTime() -
+        expectedExpiration.getTimezoneOffset() * 60_000,
+    )
+      .toISOString()
+      .slice(0, 16);
+
     show(<ApiKeys />);
+    expect((screen.getByLabelText("Expires at") as HTMLInputElement).value).toBe(
+      expectedLocalExpiration,
+    );
     const input = await screen.findByLabelText("Name for My key");
     fireEvent.change(input, { target: { value: "Renamed" } });
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
@@ -32,7 +44,11 @@ describe("API key initial loading and mutations", () => {
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "New key" } });
     fireEvent.click(screen.getByRole("button", { name: "Create key" }));
     expect(await screen.findByText("Copy this key now: new-token")).toBeTruthy();
-    expect(service.createApiKey).toHaveBeenCalledWith("New key", ["read"], undefined);
+    expect(service.createApiKey).toHaveBeenCalledWith(
+      "New key",
+      ["read"],
+      expectedLocalExpiration,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(service.revokeApiKey).toHaveBeenCalledWith("personal"));
     await waitFor(() => expect(service.listApiKeys).toHaveBeenCalledTimes(4));
