@@ -1,5 +1,6 @@
-import { lazy, Suspense, useState } from "react";
+import { useState } from "react";
 import { Modal, TextInput, Button, Group, Stack, Select } from "@mantine/core";
+import { DateInput } from "@mantine/dates";
 import { useForm } from "@mantine/form";
 import { zod4Resolver } from "mantine-form-zod-resolver";
 import { z } from "zod/v4";
@@ -7,12 +8,6 @@ import { useTranslation } from "react-i18next";
 import { useCreateApiKeyMutation } from "@/ee/api-key/queries/api-key-query";
 import { IconCalendar } from "@tabler/icons-react";
 import { IApiKey } from "@/ee/api-key";
-
-const DateInput = lazy(() =>
-  import("@mantine/dates").then((module) => ({
-    default: module.DateInput,
-  })),
-);
 
 interface CreateApiKeyModalProps {
   opened: boolean;
@@ -25,6 +20,16 @@ const formSchema = z.object({
   expiresAt: z.string().optional(),
 });
 type FormValues = z.infer<typeof formSchema>;
+
+const getDateAfterDays = (days: number) => {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 
 export function CreateApiKeyModal({
   opened,
@@ -39,7 +44,7 @@ export function CreateApiKeyModal({
     validate: zod4Resolver(formSchema),
     initialValues: {
       name: "",
-      expiresAt: "",
+      expiresAt: getDateAfterDays(90),
     },
   });
 
@@ -47,13 +52,7 @@ export function CreateApiKeyModal({
     if (expirationOption === "never") {
       return undefined;
     }
-    if (expirationOption === "custom") {
-      return form.values.expiresAt;
-    }
-    const days = parseInt(expirationOption);
-    const date = new Date();
-    date.setDate(date.getDate() + days);
-    return date.toISOString();
+    return form.values.expiresAt;
   };
 
   const getExpirationLabel = (days: number) => {
@@ -76,6 +75,17 @@ export function CreateApiKeyModal({
     { value: "never", label: t("No expiration") },
   ];
 
+  const handleExpirationOptionChange = (value: string | null) => {
+    const nextOption = value || "90";
+    setExpirationOption(nextOption);
+
+    if (nextOption === "never") {
+      form.setFieldValue("expiresAt", "");
+    } else if (nextOption !== "custom") {
+      form.setFieldValue("expiresAt", getDateAfterDays(Number(nextOption)));
+    }
+  };
+
   const handleSubmit = async (data: {
     name?: string;
     expiresAt?: string | Date;
@@ -97,6 +107,7 @@ export function CreateApiKeyModal({
 
   const handleClose = () => {
     form.reset();
+    form.setFieldValue("expiresAt", getDateAfterDays(90));
     setExpirationOption("90");
     onClose();
   };
@@ -123,20 +134,22 @@ export function CreateApiKeyModal({
             label={t("Expiration")}
             data={expirationOptions}
             value={expirationOption}
-            onChange={(value) => setExpirationOption(value || "90")}
+            onChange={handleExpirationOptionChange}
             leftSection={<IconCalendar size={16} />}
             allowDeselect={false}
           />
 
-          {expirationOption === "custom" && (
-            <Suspense fallback={null}>
-              <DateInput
-                label={t("Custom expiration date")}
-                placeholder={t("Select expiration date")}
-                minDate={new Date()}
-                {...form.getInputProps("expiresAt")}
-              />
-            </Suspense>
+          {expirationOption !== "never" && (
+            <DateInput
+              label={t("Expiration date")}
+              placeholder={t("Select expiration date")}
+              minDate={new Date()}
+              {...form.getInputProps("expiresAt")}
+              onChange={(value) => {
+                form.setFieldValue("expiresAt", value ?? "");
+                setExpirationOption("custom");
+              }}
+            />
           )}
 
           <Group justify="flex-end" mt="md">
