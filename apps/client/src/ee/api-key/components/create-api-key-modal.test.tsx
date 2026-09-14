@@ -35,7 +35,10 @@ if (!window.ResizeObserver) {
 }
 
 describe("CreateApiKeyModal", () => {
-  it("defaults expiration to 90 days", () => {
+  it("shows the default 90-day expiration date on first render", async () => {
+    const expectedDate = new Date();
+    expectedDate.setDate(expectedDate.getDate() + 90);
+
     render(
       <MantineProvider>
         <CreateApiKeyModal
@@ -50,5 +53,19 @@ describe("CreateApiKeyModal", () => {
       (screen.getByRole("combobox", { name: "Expiration" }) as HTMLInputElement)
         .value,
     ).toMatch(/^90 days \(/);
+
+    expect(
+      (
+        (await screen.findByRole("textbox", {
+          name: "Expiration date",
+        })) as HTMLInputElement
+      ).value,
+    ).toBe(
+      expectedDate.toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      }),
+    );
   });
 });
