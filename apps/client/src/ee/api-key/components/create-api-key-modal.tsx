@@ -32,7 +32,7 @@ export function CreateApiKeyModal({
   onSuccess,
 }: CreateApiKeyModalProps) {
   const { t, i18n } = useTranslation();
-  const [expirationOption, setExpirationOption] = useState<string>("30");
+  const [expirationOption, setExpirationOption] = useState<string>("90");
   const createApiKeyMutation = useCreateApiKeyMutation();
 
   const form = useForm<FormValues>({
@@ -97,7 +97,7 @@ export function CreateApiKeyModal({
 
   const handleClose = () => {
     form.reset();
-    setExpirationOption("30");
+    setExpirationOption("90");
     onClose();
   };
 
@@ -123,7 +123,7 @@ export function CreateApiKeyModal({
             label={t("Expiration")}
             data={expirationOptions}
             value={expirationOption}
-            onChange={(value) => setExpirationOption(value || "30")}
+            onChange={(value) => setExpirationOption(value || "90")}
             leftSection={<IconCalendar size={16} />}
             allowDeselect={false}
           />
