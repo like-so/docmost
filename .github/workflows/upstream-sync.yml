@@ -1,0 +1,124 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    # Every 6 hours at :17
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Merge and run gates, but do not push'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync-upstream-main:
+    runs-on: ubuntu-latest
+    env:
+      SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.NIGHTLY_TOKEN || github.token }}
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            codeload.github.com:443
+            github-cloud.s3.amazonaws.com:443
+            github-cloud.githubusercontent.com:443
+            github.com:443
+            nodejs.org:443
+            objects.githubusercontent.com:443
+            registry.npmjs.org:443
+
+      - name: Checkout main
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure Git author
+        run: |
+          set -euo pipefail
+          git config user.name "gyunt-bot"
+          git config user.email "truth0233@naver.com"
+
+      - name: Fetch origin and upstream main
+        run: |
+          set -euo pipefail
+          git fetch "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            +refs/heads/main:refs/remotes/origin/main
+          git remote add upstream https://github.com/docmost/docmost.git
+          git fetch upstream main
+          echo "origin_sha=$(git rev-parse origin/main)"
+          echo "upstream_sha=$(git rev-parse upstream/main)"
+
+      - name: Merge upstream main
+        id: merge
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "origin/main already contains upstream/main; nothing to sync"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git checkout main
+          git reset --hard origin/main
+          git merge --no-ff upstream/main -m "merge: sync upstream main"
+          echo "merge_sha=$(git rev-parse HEAD)"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify merge ancestry
+        if: steps.merge.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor origin/main HEAD
+          git merge-base --is-ancestor upstream/main HEAD
+          echo "merge commit contains both origin/main and upstream/main"
+
+      - name: Install pnpm
+        if: steps.merge.outputs.has_changes == 'true'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v7
+        # Reads the pnpm version from packageManager in the root package.json
+
+      - name: Set up Node
+        if: steps.merge.outputs.has_changes == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+
+      # --experimental-vm-modules is required for @fastify/cookie's ESM dynamic import,
+      # but jest under that flag rejects require() of ESM-only nanoid in the other suites,
+      # so the SAML HTTP suite runs in its own flagged jest process.
+      - name: Run custom-feature gates
+        if: steps.merge.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm --filter server test core/auth-provider --testPathIgnorePatterns '/node_modules/' 'sso\.saml-http'
+          NODE_OPTIONS=--experimental-vm-modules pnpm --filter server test core/auth-provider/sso.saml-http
+          pnpm run agpl:validate
+
+      - name: Push synced main
+        if: steps.merge.outputs.has_changes == 'true' && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          git push "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+
+      - name: Dry-run summary
+        if: steps.merge.outputs.has_changes == 'true' && inputs.dry_run == true
+        run: |
+          set -euo pipefail
+          echo "Dry run: merge commit $(git rev-parse HEAD) passed gates; not pushing"
