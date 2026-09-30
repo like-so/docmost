@@ -144,6 +144,25 @@ export class RagStateRepository {
     profileHash: string,
     generationId: string,
   ): Promise<PublishOutcome> {
+    // Lock order: source row first, then the workspace profile. The share
+    // lock is held to commit, so a concurrent profile change either commits
+    // before this read (the CAS then rejects the old hash) or waits for this
+    // publication to finish; a committed change can never be followed by a
+    // successful stale-profile publication.
+    await trx
+      .selectFrom('ragSourceState')
+      .select('pageId')
+      .where('workspaceId', '=', key.workspaceId)
+      .where('pageId', '=', key.pageId)
+      .forUpdate()
+      .executeTakeFirst();
+    await trx
+      .selectFrom('ragWorkspaceProfile')
+      .select('workspaceId')
+      .where('workspaceId', '=', key.workspaceId)
+      .forShare()
+      .executeTakeFirst();
+
     const result = await trx
       .updateTable('ragSourceState')
       .set({

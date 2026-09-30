@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { Kysely } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import { DbInterface } from '@docmost/db/types/db.interface';
-import { toInputRevision } from '../contracts';
+import { PublishOutcome, toInputRevision } from '../contracts';
 import { RagStateRepository } from './rag-state.repository';
 import {
   countRows,
@@ -337,4 +337,163 @@ import {
       expect(late).toBe('deleted');
     });
   });
+
+  it('rejects a stale-profile publication when a profile change commits first', async () => {
+    await setup(async (db, repo, key) => {
+      const { inputRevision } = await advance(db, repo, key, 'upsert', 'page');
+      await enableProfile(db, repo, key.workspaceId, 'profile-a');
+      const generationId = await stageGeneration(
+        db,
+        key,
+        'profile-a',
+        inputRevision,
+      );
+
+      const order: string[] = [];
+      let releaseX: () => void = () => undefined;
+      const xHold = new Promise<void>((resolve) => (releaseX = resolve));
+      let releaseZ: () => void = () => undefined;
+      const zHold = new Promise<void>((resolve) => (releaseZ = resolve));
+      const releaseAll = () => {
+        releaseX();
+        releaseZ();
+      };
+
+      const waitFor = async <T>(
+        probe: () => Promise<T>,
+        accept: (value: T) => boolean,
+        what: string,
+      ): Promise<T> => {
+        const deadline = Date.now() + 15000;
+        for (;;) {
+          const value = await probe();
+          if (accept(value)) return value;
+          if (Date.now() > deadline) {
+            throw new Error(`timed out waiting for ${what}`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      };
+
+      // Backends of the current test database only.
+      const sourceRowWaiters = async () => {
+        const rows = await sql<{
+          pid: number;
+          blocking: number[];
+          query: string;
+        }>`
+          select a.pid,
+                 pg_blocking_pids(a.pid) as blocking,
+                 left(a.query, 200) as query
+          from pg_stat_activity a
+          where a.datname = current_database()
+            and a.wait_event_type = 'Lock'
+            and a.query ilike '%rag_source_state%'
+            and a.pid <> pg_backend_pid()
+        `.execute(db);
+        return rows.rows;
+      };
+      const pinnedRowPid = async () => {
+        const rows = await sql<{ pid: number }>`
+          select a.pid
+          from pg_stat_activity a
+          where a.datname = current_database()
+            and a.state = 'idle in transaction'
+            and a.query ilike '%rag_source_state%'
+            and a.pid <> pg_backend_pid()
+        `.execute(db);
+        return rows.rows[0]?.pid ?? null;
+      };
+
+      // X pins the source row without touching CAS-checked columns.
+      const xDone = db
+        .transaction()
+        .execute(async (trx) => {
+          await trx
+            .updateTable('ragSourceState')
+            .set({ updatedAt: new Date() })
+            .where('workspaceId', '=', key.workspaceId)
+            .where('pageId', '=', key.pageId)
+            .execute();
+          order.push('x-locked');
+          await xHold;
+        })
+        .then(() => order.push('x-committed'));
+
+      // Z holds an uncommitted profile change.
+      const zDone = db
+        .transaction()
+        .execute(async (trx) => {
+          await repo.updateWorkspaceProfile(trx, key.workspaceId, {
+            enabled: true,
+            profileId: randomUUID(),
+            profileHash: 'profile-b',
+          });
+          order.push('z-applied');
+          await zHold;
+        })
+        .then(() => order.push('z-committed'));
+
+      // Y publishes for the still-current revision and must block on X.
+      let yDone: Promise<PublishOutcome> = Promise.resolve('superseded');
+      try {
+        await waitFor(
+          async () => order.includes('x-locked'),
+          (locked) => locked,
+          'X to pin the source row',
+        );
+        await waitFor(
+          async () => order.includes('z-applied'),
+          (applied) => applied,
+          'Z to hold the uncommitted profile change',
+        );
+
+        yDone = db.transaction().execute(async (trx) => {
+          const outcome = await repo.compareAndSwapPublication(
+            trx,
+            key,
+            inputRevision,
+            'profile-a',
+            generationId,
+          );
+          order.push(`y:${outcome}`);
+          return outcome;
+        });
+
+        const waiter = await waitFor(
+          async () =>
+            (await sourceRowWaiters()).find(
+              (row) => row.blocking.length > 0,
+            ) ?? null,
+          (row) => row !== null,
+          'the publication to block on the pinned source row',
+        );
+        const xPid = await waitFor(
+          pinnedRowPid,
+          (pid) => pid !== null,
+          'the pinning transaction backend',
+        );
+        expect(waiter.blocking).toContain(xPid);
+
+        // The profile change commits first; the publication must then
+        // observe the committed profile and reject the old hash.
+        releaseZ();
+        await zDone;
+        releaseX();
+        const outcome = await yDone;
+        await xDone;
+
+        expect(outcome).toBe('superseded');
+        const state = await repo.find(db, key);
+        expect(state?.publishedGenerationId).toBeNull();
+        expect(state?.publishedInputRevision).toBeNull();
+        const profile = await repo.findWorkspaceProfile(db, key.workspaceId);
+        expect(profile?.enabled).toBe(true);
+        expect(profile?.profileHash).toBe('profile-b');
+      } finally {
+        releaseAll();
+        await Promise.allSettled([xDone, yDone, zDone]);
+      }
+    });
+  }, 30000);
 });

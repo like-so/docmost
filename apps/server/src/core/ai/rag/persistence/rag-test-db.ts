@@ -39,9 +39,12 @@ export async function withRagTestDb(
   const pool = postgres(url.toString(), { max: 5 });
   // Migrations run on a pluginless instance like src/database/migrate.ts; the
   // test instance mirrors database.module.ts with the CamelCasePlugin so
-  // camelCase table names map to the snake_case schema.
+  // camelCase table names map to the snake_case schema. The migration Kysely
+  // instance gets its own pool: destroying it ends that pool, and the test
+  // pool below must never be reused after a destroy.
+  const migrationPool = postgres(url.toString(), { max: 1 });
   const migrationDb = new Kysely<any>({
-    dialect: new PostgresJSDialect({ postgres: pool }),
+    dialect: new PostgresJSDialect({ postgres: migrationPool }),
   });
   const migrator = new Migrator({
     db: migrationDb,
