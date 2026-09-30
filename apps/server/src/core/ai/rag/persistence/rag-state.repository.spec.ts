@@ -462,9 +462,8 @@ import {
 
         const waiter = await waitFor(
           async () =>
-            (await sourceRowWaiters()).find(
-              (row) => row.blocking.length > 0,
-            ) ?? null,
+            (await sourceRowWaiters()).find((row) => row.blocking.length > 0) ??
+            null,
           (row) => row !== null,
           'the publication to block on the pinned source row',
         );
