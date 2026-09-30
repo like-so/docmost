@@ -778,6 +778,75 @@ export interface OauthTokens {
   workspaceId: string;
 }
 
+export interface RagChunks {
+  id: string;
+  generationId: string;
+  workspaceId: string;
+  pageId: string;
+  attachmentId: string | null;
+  ordinal: number;
+  text: string;
+  tokenCount: number;
+  textHash: string;
+  locator: Json;
+  embedding: Json | null;
+  embeddingDimensions: number | null;
+  createdAt: Generated<Timestamp>;
+}
+
+export interface RagGenerations {
+  id: Generated<string>;
+  workspaceId: string;
+  pageId: string;
+  inputRevision: Int8;
+  profileHash: string;
+  status: Generated<string>;
+  errorCode: string | null;
+  chunkCount: number | null;
+  publishedAt: Timestamp | null;
+  createdAt: Generated<Timestamp>;
+  updatedAt: Generated<Timestamp>;
+}
+
+export interface RagOutbox {
+  id: string;
+  workspaceId: string;
+  pageId: string;
+  inputRevision: Int8;
+  operation: string;
+  cause: string;
+  schemaVersion: Generated<number>;
+  occurredAt: Timestamp;
+  status: Generated<string>;
+  attempts: Generated<number>;
+  lastErrorCode: string | null;
+  deliveredAt: Timestamp | null;
+  createdAt: Generated<Timestamp>;
+}
+
+export interface RagWorkspaceProfile {
+  workspaceId: string;
+  enabled: Generated<boolean>;
+  profileId: string | null;
+  profileHash: string | null;
+  createdAt: Generated<Timestamp>;
+  updatedAt: Generated<Timestamp>;
+}
+
+export interface RagSourceState {
+  id: Generated<string>;
+  workspaceId: string;
+  pageId: string;
+  desiredInputRevision: Int8;
+  sourceStatus: string;
+  lastOperation: string | null;
+  lastCause: string | null;
+  publishedInputRevision: Int8 | null;
+  publishedGenerationId: string | null;
+  createdAt: Generated<Timestamp>;
+  updatedAt: Generated<Timestamp>;
+}
+
 export interface DB {
   aiChats: AiChats;
   aiChatMessages: AiChatMessages;
@@ -810,6 +879,11 @@ export interface DB {
   pageVerifiers: PageVerifiers;
   pages: Pages;
   publicSpaces: PublicSpaces;
+  ragChunks: RagChunks;
+  ragGenerations: RagGenerations;
+  ragOutbox: RagOutbox;
+  ragSourceState: RagSourceState;
+  ragWorkspaceProfile: RagWorkspaceProfile;
   scimTokens: ScimTokens;
   shares: Shares;
   siemDestinations: SiemDestinations;
