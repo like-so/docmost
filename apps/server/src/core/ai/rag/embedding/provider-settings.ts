@@ -1,5 +1,9 @@
+import { createHash } from 'node:crypto';
 import { EncryptionService } from '../../../../integrations/encryption/encryption.service';
 import { Workspace } from '@docmost/db/types/entity.types';
+import { canonicalJson } from './profile-hash';
+
+const PROVIDER_IDENTITY_DOMAIN = 'docmost-rag-v1:providerSettingsIdentity\n';
 
 /**
  * Minimal shared accessor for the existing encrypted workspace AI provider
@@ -40,4 +44,26 @@ export function readWorkspaceAiProvider(
     throw new Error('Workspace AI provider settings are unreadable');
   }
   return provider as WorkspaceAiProvider;
+}
+
+/**
+ * Nonsecret identity of the effective encrypted provider settings (contract
+ * embedding.endpointIdentity). Covers the fields that define the embedding
+ * endpoint and space; credential values are never part of the identity or
+ * any diagnostic.
+ */
+export function providerSettingsIdentity(
+  provider: WorkspaceAiProvider,
+): string {
+  return createHash('sha256')
+    .update(PROVIDER_IDENTITY_DOMAIN)
+    .update(
+      canonicalJson({
+        driver: provider.driver,
+        baseUrl: provider.baseUrl,
+        chatModel: provider.chatModel,
+        embeddingModel: provider.embeddingModel ?? null,
+      }),
+    )
+    .digest('hex');
 }

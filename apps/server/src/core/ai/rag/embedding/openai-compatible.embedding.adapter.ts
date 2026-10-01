@@ -4,8 +4,8 @@ import { WorkspaceRepo } from '@docmost/db/repos/workspace/workspace.repo';
 import {
   EmbeddingBatchResult,
   EmbeddingInput,
-  EmbeddingQueryResult,
   EmbeddingPort,
+  EmbeddingQueryResult,
   IndexProfile,
   RagError,
   RAG_EMBEDDING_PORT,
@@ -13,7 +13,10 @@ import {
 import { EncryptionService } from '../../../../integrations/encryption/encryption.service';
 import { EnvironmentService } from '../../../../integrations/environment/environment.service';
 import { OutboundAgentFactory } from '../../../../integrations/outbound/outbound-agent.factory';
-import { readWorkspaceAiProvider } from './provider-settings';
+import {
+  providerSettingsIdentity,
+  readWorkspaceAiProvider,
+} from './provider-settings';
 
 const SUPPORTED_EMBEDDING_DRIVER = 'openai-compatible';
 
@@ -21,13 +24,15 @@ const SUPPORTED_EMBEDDING_DRIVER = 'openai-compatible';
 const CONFIGURATION_STATUSES = new Set([401, 403, 404]);
 const TRANSIENT_STATUSES = new Set([408, 409, 429]);
 
-const NETWORK_ERROR_NAMES = new Set(['AbortError', 'TimeoutError']);
-const NETWORK_ERROR_CODES = new Set([
+const TRANSPORT_ERROR_NAMES = new Set(['AbortError', 'TimeoutError']);
+const TRANSPORT_ERROR_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
   'ENETUNREACH',
   'ETIMEDOUT',
   'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'UND_ERR_ABORTED',
 ]);
 
 type EmbeddingsResponseBody = {
@@ -35,12 +40,24 @@ type EmbeddingsResponseBody = {
   model?: unknown;
 };
 
+function isTransportFailure(error: unknown): boolean {
+  const named = error as { name?: string; code?: string };
+  return (
+    TRANSPORT_ERROR_NAMES.has(named?.name ?? '') ||
+    TRANSPORT_ERROR_CODES.has(named?.code ?? '')
+  );
+}
+
 /**
  * OpenAI-compatible embeddings driver (docmost-rag-v1 contract 8). Talks to
  * the existing encrypted workspace provider settings through the shared
- * outbound factory so SSRF guards, TLS and network restrictions apply.
- * Missing capability is explicit: no hash vectors, public endpoints, random
- * values or chat-model substitution.
+ * outbound factory so SSRF guards, TLS and network restrictions apply. The
+ * effective nonsecret provider identity and driver are bound to the resolved
+ * index profile before vectors are accepted: drift is rejected explicitly,
+ * never silently bridged. Missing capability is explicit: no hash vectors,
+ * public endpoints, random values or chat-model substitution. Response bodies
+ * are always consumed, discarded or cancelled before the outbound lease is
+ * released, so agent close cannot block on unread backpressure.
  */
 @Injectable()
 export class OpenAiCompatibleEmbeddingAdapter implements EmbeddingPort {
@@ -108,11 +125,34 @@ export class OpenAiCompatibleEmbeddingAdapter implements EmbeddingPort {
       );
     }
     const workspace = await this.workspaceRepo.findById(workspaceId);
-    const provider = readWorkspaceAiProvider(workspace, this.encryption);
+    let provider;
+    try {
+      provider = readWorkspaceAiProvider(workspace, this.encryption);
+    } catch {
+      throw new RagError(
+        'EMBEDDING_NOT_CONFIGURED',
+        'workspace AI provider settings are unreadable',
+      );
+    }
     if (!provider) {
       throw new RagError(
         'EMBEDDING_NOT_CONFIGURED',
         'workspace AI provider settings are not configured',
+      );
+    }
+    if (provider.driver !== indexProfile.embedding.driver) {
+      throw new RagError(
+        'EMBEDDING_NOT_CONFIGURED',
+        'workspace AI provider driver no longer matches the index profile',
+      );
+    }
+    if (
+      providerSettingsIdentity(provider) !==
+      indexProfile.embedding.endpointIdentity
+    ) {
+      throw new RagError(
+        'EMBEDDING_NOT_CONFIGURED',
+        'workspace AI provider endpoint no longer matches the index profile; re-resolve the profile',
       );
     }
 
@@ -137,40 +177,60 @@ export class OpenAiCompatibleEmbeddingAdapter implements EmbeddingPort {
       headers.authorization = `Bearer ${provider.apiKey}`;
     }
 
-    let response;
-    const lease = await this.outboundAgent.lease(url.toString());
+    let lease;
     try {
-      response = await request(url, {
-        method: 'POST',
-        dispatcher: lease.dispatcher,
-        headers,
-        body,
-        signal: AbortSignal.timeout(this.environment.getAiRequestTimeoutMs()),
-      });
-    } catch (error) {
-      throw this.classifyRequestError(error);
+      lease = await this.outboundAgent.lease(url.toString());
+    } catch {
+      throw new RagError(
+        'EMBEDDING_UNAVAILABLE',
+        'embedding request failed before dispatch',
+      );
+    }
+    try {
+      let response;
+      try {
+        response = await request(url, {
+          method: 'POST',
+          dispatcher: lease.dispatcher,
+          headers,
+          body,
+          signal: AbortSignal.timeout(this.environment.getAiRequestTimeoutMs()),
+        });
+      } catch (error) {
+        throw this.classifyRequestError(error);
+      }
+      try {
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw this.classifyStatusError(response.statusCode);
+        }
+        let responseBody: EmbeddingsResponseBody;
+        try {
+          responseBody = (await response.body.json()) as EmbeddingsResponseBody;
+        } catch (error) {
+          if (isTransportFailure(error)) {
+            throw new RagError(
+              'EMBEDDING_UNAVAILABLE',
+              'embedding response body failed before completion',
+            );
+          }
+          throw new RagError(
+            'EMBEDDING_RESPONSE_INVALID',
+            'embedding endpoint returned a non-JSON response',
+          );
+        }
+        if (responseBody === null || typeof responseBody !== 'object') {
+          throw new RagError(
+            'EMBEDDING_RESPONSE_INVALID',
+            'embedding endpoint returned an invalid response body',
+          );
+        }
+        return this.mapResponse(indexProfile, inputs, responseBody);
+      } finally {
+        this.discardBody(response);
+      }
     } finally {
       await lease.release();
     }
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      this.discardBody(response);
-      throw this.classifyStatusError(response.statusCode);
-    }
-
-    let responseBody: EmbeddingsResponseBody;
-    try {
-      responseBody = (await response.body.json()) as EmbeddingsResponseBody;
-    } catch {
-      throw new RagError(
-        'EMBEDDING_RESPONSE_INVALID',
-        'embedding endpoint returned a non-JSON response',
-      );
-    } finally {
-      this.discardBody(response);
-    }
-
-    return this.mapResponse(indexProfile, inputs, responseBody);
   }
 
   private mapResponse(
@@ -250,11 +310,7 @@ export class OpenAiCompatibleEmbeddingAdapter implements EmbeddingPort {
 
   private classifyRequestError(error: unknown): RagError {
     if (error instanceof RagError) return error;
-    const named = error as { name?: string; code?: string };
-    if (
-      NETWORK_ERROR_NAMES.has(named?.name ?? '') ||
-      NETWORK_ERROR_CODES.has(named?.code ?? '')
-    ) {
+    if (isTransportFailure(error)) {
       return new RagError(
         'EMBEDDING_UNAVAILABLE',
         'embedding endpoint is unavailable',

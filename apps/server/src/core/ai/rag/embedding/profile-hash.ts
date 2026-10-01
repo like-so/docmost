@@ -10,7 +10,7 @@ const PROFILE_ID_NAMESPACE = '6f1fd667-2d58-4f79-9eb5-8f9d3c0a4b21';
  * covers exactly the configured computation parameters, independent of key
  * order in stored settings.
  */
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(canonicalJson).join(',')}]`;
   }
