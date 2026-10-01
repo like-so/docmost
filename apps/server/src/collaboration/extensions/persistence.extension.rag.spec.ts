@@ -31,11 +31,7 @@ import { PersistenceExtension } from './persistence.extension';
 
     const stubEmitter = { emit: () => undefined } as unknown as EventEmitter2;
 
-    const buildExtension = (
-      db: Kysely<DbInterface>,
-      pageRepo: PageRepo,
-      ledger: RagSourceLedger,
-    ) =>
+    const buildExtension = (db: Kysely<DbInterface>, pageRepo: PageRepo) =>
       new PersistenceExtension(
         pageRepo,
         db,
@@ -49,7 +45,6 @@ import { PersistenceExtension } from './persistence.extension';
           syncPageTransclusions: async () => undefined,
           syncPageReferences: async () => undefined,
         } as unknown as TransclusionService,
-        ledger,
       );
 
     const docWithText = (text: string) => ({
@@ -116,8 +111,13 @@ import { PersistenceExtension } from './persistence.extension';
         const stateRepository = new RagStateRepository(db);
         const outboxRepository = new RagOutboxRepository(db);
         const ledger = new RagSourceLedger(stateRepository, outboxRepository);
-        const pageRepo = new PageRepo(db, {} as SpaceMemberRepo, stubEmitter);
-        const extension = buildExtension(db, pageRepo, ledger);
+        const pageRepo = new PageRepo(
+          db,
+          {} as SpaceMemberRepo,
+          stubEmitter,
+          ledger,
+        );
+        const extension = buildExtension(db, pageRepo);
 
         await extension.onStoreDocument(
           storePayload(
@@ -174,8 +174,9 @@ import { PersistenceExtension } from './persistence.extension';
           db,
           {} as SpaceMemberRepo,
           stubEmitter,
+          ledger,
         );
-        const extension = buildExtension(db, pageRepo, ledger);
+        const extension = buildExtension(db, pageRepo);
 
         await extension.onStoreDocument(
           storePayload(

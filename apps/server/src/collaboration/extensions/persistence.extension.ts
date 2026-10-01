@@ -6,7 +6,7 @@ import {
   onStoreDocumentPayload,
 } from '@hocuspocus/server';
 import * as Y from 'yjs';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { TiptapTransformer } from '@hocuspocus/transformer';
 import { getPageId, jsonToText, tiptapExtensions } from '../collaboration.util';
 import { PageRepo } from '@docmost/db/repos/page/page.repo';
@@ -33,7 +33,6 @@ import {
   HISTORY_INTERVAL,
 } from '../constants';
 import { TransclusionService } from '../../core/page/transclusion/transclusion.service';
-import { RAG_SOURCE_LEDGER, SourceLedger } from '../../core/ai/rag/contracts';
 
 @Injectable()
 export class PersistenceExtension implements Extension {
@@ -48,7 +47,6 @@ export class PersistenceExtension implements Extension {
     @InjectQueue(QueueName.NOTIFICATION_QUEUE) private notificationQueue: Queue,
     private readonly collabHistory: CollabHistoryService,
     private readonly transclusionService: TransclusionService,
-    @Inject(RAG_SOURCE_LEDGER) private readonly sourceLedger: SourceLedger,
   ) {}
 
   async onLoadDocument(data: onLoadDocumentPayload) {
@@ -158,15 +156,6 @@ export class PersistenceExtension implements Extension {
           },
           pageId,
           trx,
-        );
-
-        // The RAG revision advance and outbox record commit atomically with
-        // the content save; a rolled-back save leaves no RAG event.
-        await this.sourceLedger.recordChange(
-          trx,
-          { workspaceId: page.workspaceId, pageId },
-          'upsert',
-          'page',
         );
 
         this.logger.debug(`Page updated: ${pageId} - SlugId: ${page.slugId}`);
