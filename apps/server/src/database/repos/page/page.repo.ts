@@ -16,6 +16,7 @@ import { jsonArrayFrom, jsonObjectFrom } from 'kysely/helpers/postgres';
 import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { EventName } from '../../../common/events/event.contants';
+import { RagSourceLedger } from '../../../core/ai/rag/persistence/rag-source-ledger';
 
 @Injectable()
 export class PageRepo {
@@ -23,6 +24,7 @@ export class PageRepo {
     @InjectKysely() private readonly db: KyselyDB,
     private spaceMemberRepo: SpaceMemberRepo,
     private eventEmitter: EventEmitter2,
+    private sourceLedger: RagSourceLedger,
   ) {}
 
   private baseFields: Array<keyof Page> = [
@@ -144,15 +146,38 @@ export class PageRepo {
     pageIds: string[],
     trx?: KyselyTransaction,
   ) {
-    const result = await dbOrTx(this.db, trx)
-      .updateTable('pages')
-      .set({ ...updatePageData, updatedAt: new Date() })
-      .where(
-        pageIds.some((pageId) => !isValidUUID(pageId)) ? 'slugId' : 'id',
-        'in',
-        pageIds,
-      )
-      .executeTakeFirst();
+    const run = async (tx: KyselyTransaction) => {
+      // updatePages may match slugs; resolve the actual document keys so the
+      // RAG ledger records real page ids inside this same transaction.
+      const bySlug = pageIds.some((pageId) => !isValidUUID(pageId));
+      const resolvedKeys = await tx
+        .selectFrom('pages')
+        .select(['id', 'workspaceId'])
+        .where(bySlug ? 'slugId' : 'id', 'in', pageIds)
+        .execute();
+
+      const result = await tx
+        .updateTable('pages')
+        .set({ ...updatePageData, updatedAt: new Date() })
+        .where(bySlug ? 'slugId' : 'id', 'in', pageIds)
+        .executeTakeFirst();
+
+      const recorded = new Set<string>();
+      for (const resolvedKey of resolvedKeys) {
+        if (recorded.has(resolvedKey.id)) continue;
+        recorded.add(resolvedKey.id);
+        await this.sourceLedger.recordChange(
+          tx,
+          { workspaceId: resolvedKey.workspaceId, pageId: resolvedKey.id },
+          'upsert',
+          'page',
+        );
+      }
+
+      return result;
+    };
+
+    const result = trx ? await run(trx) : await executeTx(this.db, run);
 
     this.eventEmitter.emit(EventName.PAGE_UPDATED, {
       pageIds: pageIds,
@@ -250,6 +275,27 @@ export class PageRepo {
           .execute();
 
         await trx.deleteFrom('shares').where('pageId', 'in', pageIds).execute();
+
+        // Record the delete for every row this update actually soft-deleted,
+        // in the same transaction so a rollback leaves no RAG event.
+        const deletedRows = await trx
+          .selectFrom('pages')
+          .select(['id', 'workspaceId'])
+          .where('id', 'in', pageIds)
+          .where('deletedAt', '=', currentDate)
+          .execute();
+
+        const recorded = new Set<string>();
+        for (const deletedRow of deletedRows) {
+          if (recorded.has(deletedRow.id)) continue;
+          recorded.add(deletedRow.id);
+          await this.sourceLedger.recordChange(
+            trx,
+            { workspaceId: deletedRow.workspaceId, pageId: deletedRow.id },
+            'delete',
+            'page',
+          );
+        }
       });
 
       this.eventEmitter.emit(EventName.PAGE_SOFT_DELETED, {
@@ -304,21 +350,47 @@ export class PageRepo {
 
     const pageIds = pages.map((p) => p.id);
 
-    // Restore all pages, but only detach the root page if its parent is deleted
-    await this.db
-      .updateTable('pages')
-      .set({ deletedById: null, deletedAt: null })
-      .where('id', 'in', pageIds)
-      .execute();
-
-    // If we need to detach the restored page from its deleted parent
-    if (shouldDetachFromParent) {
-      await this.db
-        .updateTable('pages')
-        .set({ parentPageId: null })
-        .where('id', '=', pageId)
+    // Restore, optional detach and the RAG records commit atomically so a
+    // restored subtree always re-advances its desired revisions.
+    await executeTx(this.db, async (trx) => {
+      const restoredRows = await trx
+        .selectFrom('pages')
+        .select(['id', 'workspaceId'])
+        .where('id', 'in', pageIds)
+        .where('deletedAt', 'is not', null)
         .execute();
-    }
+
+      // Restore all pages, but only detach the root page if its parent is
+      // deleted
+      await trx
+        .updateTable('pages')
+        .set({ deletedById: null, deletedAt: null })
+        .where('id', 'in', pageIds)
+        .execute();
+
+      // If we need to detach the restored page from its deleted parent
+      if (shouldDetachFromParent) {
+        await trx
+          .updateTable('pages')
+          .set({ parentPageId: null })
+          .where('id', '=', pageId)
+          .execute();
+      }
+
+      // Record only the rows this restore actually un-deleted; pages that
+      // were never deleted have no source change.
+      const recorded = new Set<string>();
+      for (const restoredRow of restoredRows) {
+        if (recorded.has(restoredRow.id)) continue;
+        recorded.add(restoredRow.id);
+        await this.sourceLedger.recordChange(
+          trx,
+          { workspaceId: restoredRow.workspaceId, pageId: restoredRow.id },
+          'upsert',
+          'restore',
+        );
+      }
+    });
     this.eventEmitter.emit(EventName.PAGE_RESTORED, {
       pageIds: pageIds,
       workspaceId: workspaceId,
@@ -371,7 +443,12 @@ export class PageRepo {
     });
   }
 
-  async getCreatedByPages(creatorId: string, requestingUserId: string, pagination: PaginationOptions, spaceId?: string) {
+  async getCreatedByPages(
+    creatorId: string,
+    requestingUserId: string,
+    pagination: PaginationOptions,
+    spaceId?: string,
+  ) {
     let query = this.db
       .selectFrom('pages')
       .select(this.baseFields)
@@ -382,7 +459,11 @@ export class PageRepo {
     if (spaceId) {
       query = query.where('spaceId', '=', spaceId);
     } else {
-      query = query.where('spaceId', 'in', this.spaceMemberRepo.getUserSpaceIdsQuery(requestingUserId));
+      query = query.where(
+        'spaceId',
+        'in',
+        this.spaceMemberRepo.getUserSpaceIdsQuery(requestingUserId),
+      );
     }
 
     return executeWithCursorPagination(query, {
