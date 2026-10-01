@@ -7,7 +7,7 @@ import {
 } from '../contracts';
 import { sha256Hex } from '../parsing/document-parser.service';
 import { RagChunker } from './chunker.service';
-import { resolveEncoding } from './tokenizer';
+import { resolveEncoding, resolveTokenizer } from './tokenizer';
 
 describe('RagChunker', () => {
   let chunker: RagChunker;
@@ -284,7 +284,175 @@ describe('RagChunker', () => {
       ).rejects.toThrow(/tokenizer/);
     });
   });
+  describe('model framing', () => {
+    // The registered pinned tokenizer is loaded over the network from its
+    // immutable revision; expected counts were verified against the parent
+    // embedding model's own /tokenize endpoint.
+    const PINNED_TOKENIZER_ID =
+      'hf:sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2@e8f8c211226b894fcb81acc59f3b34ba3efd5f42';
+    const longTimeout = 60_000;
+
+    it(
+      'includes the post-processor framing in chunk tokenCount',
+      async () => {
+        const text = '안녕하세요 세계. A short paragraph about retrieval.';
+        const document = makeDocument([pageSection([], null, text)]);
+        const tokenizer = await resolveTokenizer(PINNED_TOKENIZER_ID, '');
+
+        const batch = await chunker.split(document, makeHfProfile());
+
+        expect(batch.chunks).toHaveLength(1);
+        const chunk = batch.chunks[0];
+        const section = document.sections[0];
+        expect(section.text.slice(chunk.locator.start, chunk.locator.end)).toBe(
+          chunk.text,
+        );
+        expect(tokenizer.countTextTokens(chunk.text)).toBeGreaterThan(0);
+        expect(chunk.tokenCount).toBe(
+          tokenizer.countTextTokens(chunk.text) + tokenizer.inputOverheadTokens,
+        );
+        expect(chunk.tokenCount).toBeLessThanOrEqual(
+          makeHfProfile().maxChunkTokens,
+        );
+      },
+      longTimeout,
+    );
+
+    it(
+      'splits oversize sections within the framed budget with source-text overlap',
+      async () => {
+        const lines: string[] = [];
+        for (let i = 0; i < 40; i++) {
+          lines.push(`문장 ${i} 에는 몇 개의 단어가 들어 있습니다.`);
+        }
+        const text = lines.join('\n');
+        const document = makeDocument([pageSection(['Doc'], 'p-big', text)]);
+        const profile = makeHfProfile({
+          maxChunkTokens: 32,
+          overlapTokens: 8,
+        });
+        const tokenizer = await resolveTokenizer(PINNED_TOKENIZER_ID, '');
+        const effectiveBudget =
+          profile.maxChunkTokens - tokenizer.inputOverheadTokens;
+
+        const batch = await chunker.split(document, profile);
+
+        expect(batch.chunks.length).toBeGreaterThan(1);
+        const section = document.sections[0];
+        for (const chunk of batch.chunks) {
+          expect(
+            section.text.slice(chunk.locator.start, chunk.locator.end),
+          ).toBe(chunk.text);
+          // source-text tokens fit the framed budget
+          expect(tokenizer.countTextTokens(chunk.text)).toBeLessThanOrEqual(
+            effectiveBudget,
+          );
+          // stored count includes the framing
+          expect(chunk.tokenCount).toBe(
+            tokenizer.countTextTokens(chunk.text) + 2,
+          );
+          expect(chunk.tokenCount).toBeLessThanOrEqual(profile.maxChunkTokens);
+          expect(hasIsolatedSurrogate(chunk.text)).toBe(false);
+        }
+        // overlap: consecutive chunks share source text, bounded by overlapTokens
+        for (let i = 1; i < batch.chunks.length; i++) {
+          const previous = batch.chunks[i - 1];
+          const current = batch.chunks[i];
+          expect(current.locator.start).toBeLessThan(previous.locator.end);
+          const overlapSlice = previous.text.slice(
+            current.locator.start - previous.locator.start,
+          );
+          if (overlapSlice.length > 0) {
+            expect(tokenizer.countTextTokens(overlapSlice)).toBeLessThanOrEqual(
+              profile.overlapTokens,
+            );
+          }
+        }
+        const last = batch.chunks[batch.chunks.length - 1];
+        expect(last.locator.end).toBe(text.length);
+        batch.chunks.forEach((chunk, index) => {
+          expect(chunk.ordinal).toBe(index);
+        });
+      },
+      longTimeout,
+    );
+
+    it(
+      'splits surrogate-heavy text at scalar boundaries under the framed budget',
+      async () => {
+        const text = String.fromCodePoint(0x1f1ef, 0x1f1f5).repeat(6);
+        const document = makeDocument([pageSection([], null, text)]);
+        const profile = makeHfProfile({
+          maxChunkTokens: 4,
+          overlapTokens: 1,
+        });
+
+        const batch = await chunker.split(document, profile);
+
+        expect(batch.chunks.length).toBeGreaterThan(1);
+        const section = document.sections[0];
+        for (const chunk of batch.chunks) {
+          expect(
+            section.text.slice(chunk.locator.start, chunk.locator.end),
+          ).toBe(chunk.text);
+          expect(hasIsolatedSurrogate(chunk.text)).toBe(false);
+          expect(chunk.tokenCount).toBeLessThanOrEqual(profile.maxChunkTokens);
+        }
+        expect(batch.chunks[0].locator.start).toBe(0);
+        expect(batch.chunks[batch.chunks.length - 1].locator.end).toBe(
+          text.length,
+        );
+      },
+      longTimeout,
+    );
+
+    it(
+      'rejects a profile whose framing overhead consumes the whole budget',
+      async () => {
+        const document = makeDocument([pageSection([], null, 'text.')]);
+        const profile = makeHfProfile({ maxChunkTokens: 2, overlapTokens: 0 });
+
+        await expect(chunker.split(document, profile)).rejects.toThrow(
+          /framing overhead/,
+        );
+      },
+      longTimeout,
+    );
+
+    it(
+      'rejects overlap that reaches the effective source-text budget',
+      async () => {
+        const document = makeDocument([pageSection([], null, 'text.')]);
+        const profile = makeHfProfile({
+          maxChunkTokens: 10,
+          overlapTokens: 9,
+        });
+
+        await expect(chunker.split(document, profile)).rejects.toThrow(
+          /effective source-text budget/,
+        );
+      },
+      longTimeout,
+    );
+  });
 });
+
+function makeHfProfile(overrides?: Partial<IndexProfile>): IndexProfile {
+  return makeProfile({
+    maxChunkTokens: 128,
+    overlapTokens: 16,
+    embedding: {
+      driver: 'openai-compatible',
+      endpointIdentity: 'default',
+      model: 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
+      dimensions: 384,
+      tokenizerId:
+        'hf:sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2@e8f8c211226b894fcb81acc59f3b34ba3efd5f42',
+      maxInputTokens: 128,
+    },
+    ...overrides,
+  });
+}
 
 function makeProfile(overrides?: Partial<IndexProfile>): IndexProfile {
   return {

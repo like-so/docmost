@@ -8,7 +8,7 @@ import {
   NormalizedDocument,
 } from '../contracts';
 import { sha256Hex } from '../parsing/document-parser.service';
-import { resolveEncoding } from './tokenizer';
+import { resolveTokenizer } from './tokenizer';
 
 interface CharRange {
   start: number;
@@ -24,15 +24,17 @@ export class RagChunker implements Chunker {
     profile: IndexProfile,
   ): Promise<ChunkBatch> {
     validateChunkProfile(profile);
-    const encoding = resolveEncoding(
+    const tokenizer = await resolveTokenizer(
       profile.embedding.tokenizerId,
       profile.embedding.model,
     );
-    // Source text is ordinary text: empty allowed/disallowed special-token
-    // sets keep literals like "<|endoftext|>" from being interpreted as
-    // model control tokens or rejected.
-    const countTokens: TokenCounter = (text) =>
-      encoding.encode(text, [], []).length;
+    validateChunkBudget(profile, tokenizer.inputOverheadTokens);
+    // The model framing counts against maxChunkTokens, so the split budget
+    // for source text is what remains after the framing overhead.
+    const sourceBudget = profile.maxChunkTokens - tokenizer.inputOverheadTokens;
+    // Source text is counted as ordinary text: special-token literals in
+    // the document are never interpreted as model control tokens.
+    const countTokens: TokenCounter = (text) => tokenizer.countTextTokens(text);
 
     const chunks: Chunk[] = [];
     let ordinal = 0;
@@ -40,7 +42,7 @@ export class RagChunker implements Chunker {
       const ranges = splitSectionRanges(
         section.text,
         countTokens,
-        profile.maxChunkTokens,
+        sourceBudget,
         profile.overlapTokens,
       );
       for (const range of ranges) {
@@ -70,7 +72,9 @@ export class RagChunker implements Chunker {
           ),
           ordinal: chunkOrdinal,
           text,
-          tokenCount: countTokens(text),
+          // The stored count includes the model framing so it is directly
+          // comparable with maxChunkTokens and the model input limit.
+          tokenCount: countTokens(text) + tokenizer.inputOverheadTokens,
           locator,
         });
       }
@@ -86,23 +90,22 @@ export class RagChunker implements Chunker {
 }
 
 /**
- * Enforces the contract invariant 0 <= overlapTokens < maxChunkTokens <=
- * verified model input limit. Configuration errors fail explicitly instead
- * of being silently clamped.
+ * Enforces the contract invariants that do not depend on the tokenizer:
+ * positive integer budgets and a maxChunkTokens within the verified model
+ * input limit. Configuration errors fail explicitly instead of being
+ * silently clamped.
  */
 function validateChunkProfile(profile: IndexProfile): void {
-  const { maxChunkTokens, overlapTokens, embedding } = profile;
+  const { maxChunkTokens, embedding } = profile;
   if (!Number.isSafeInteger(maxChunkTokens) || maxChunkTokens <= 0) {
     throw new Error('RAG chunker: maxChunkTokens must be a positive integer');
   }
-  if (!Number.isSafeInteger(overlapTokens) || overlapTokens < 0) {
+  if (
+    !Number.isSafeInteger(profile.overlapTokens) ||
+    profile.overlapTokens < 0
+  ) {
     throw new Error(
       'RAG chunker: overlapTokens must be a non-negative integer',
-    );
-  }
-  if (overlapTokens >= maxChunkTokens) {
-    throw new Error(
-      'RAG chunker: overlapTokens must be smaller than maxChunkTokens',
     );
   }
   if (
@@ -116,6 +119,29 @@ function validateChunkProfile(profile: IndexProfile): void {
   if (maxChunkTokens > embedding.maxInputTokens) {
     throw new Error(
       'RAG chunker: maxChunkTokens exceeds the verified model input limit',
+    );
+  }
+}
+
+/**
+ * Enforces the framing-aware budget invariants: maxChunkTokens must leave a
+ * positive source-text budget after the model framing overhead, and
+ * overlapTokens (which counts source-text tokens only) must stay below that
+ * effective source budget.
+ */
+function validateChunkBudget(
+  profile: IndexProfile,
+  overheadTokens: number,
+): void {
+  const effectiveBudget = profile.maxChunkTokens - overheadTokens;
+  if (effectiveBudget <= 0) {
+    throw new Error(
+      `RAG chunker: model framing overhead of ${overheadTokens} tokens leaves no source-text budget within maxChunkTokens ${profile.maxChunkTokens}`,
+    );
+  }
+  if (profile.overlapTokens >= effectiveBudget) {
+    throw new Error(
+      `RAG chunker: overlapTokens must be smaller than the effective source-text budget (maxChunkTokens ${profile.maxChunkTokens} minus ${overheadTokens} framing tokens)`,
     );
   }
 }
@@ -192,24 +218,24 @@ function smallestScalarEnd(text: string, start: number): number {
 function splitSectionRanges(
   text: string,
   countTokens: TokenCounter,
-  maxChunkTokens: number,
+  sourceBudget: number,
   overlapTokens: number,
 ): CharRange[] {
   if (text.length === 0) {
     return [];
   }
-  if (countTokens(text) <= maxChunkTokens) {
+  if (countTokens(text) <= sourceBudget) {
     return [{ start: 0, end: text.length }];
   }
 
   // Pieces leave room for the overlap so a carried suffix never pushes the
   // next chunk over the budget.
-  const pieceBudget = maxChunkTokens - overlapTokens;
+  const pieceBudget = sourceBudget - overlapTokens;
   const pieces = tokenBoundedPieces(
     text,
     countTokens,
     pieceBudget,
-    maxChunkTokens,
+    sourceBudget,
   );
   const ranges: CharRange[] = [];
   let chunkStart = pieces[0].start;
@@ -225,7 +251,7 @@ function splitSectionRanges(
       // The budget applies to the complete next-chunk slice, not to
       // separately summed piece counts.
       const candidateTokens = countTokens(text.slice(chunkStart, piece.end));
-      if (candidateTokens > maxChunkTokens) {
+      if (candidateTokens > sourceBudget) {
         ranges.push({ start: chunkStart, end: packedEnd });
         const pieceTokens = countTokens(text.slice(piece.start, piece.end));
         chunkStart = overlapStart(
@@ -235,9 +261,9 @@ function splitSectionRanges(
           packedEnd,
           chunkStart,
           countTokens,
-          Math.min(overlapTokens, maxChunkTokens - pieceTokens),
+          Math.min(overlapTokens, sourceBudget - pieceTokens),
         );
-        if (countTokens(text.slice(chunkStart, piece.end)) > maxChunkTokens) {
+        if (countTokens(text.slice(chunkStart, piece.end)) > sourceBudget) {
           chunkStart = packedEnd;
         }
       }
@@ -254,7 +280,7 @@ function splitSectionRanges(
  * Expands line segments into pieces that each fit the given token budget.
  * Pieces are half-open, adjacent and non-overlapping, covering the section
  * text without gaps. A character that does not fit the overlap-adjusted
- * budget is emitted alone when it still fits maxChunkTokens; when no
+ * budget is emitted alone when it still fits sourceBudget; when no
  * complete character fits either limit the split fails explicitly instead
  * of emitting over-budget or invalid text.
  */
@@ -262,7 +288,7 @@ function tokenBoundedPieces(
   text: string,
   countTokens: TokenCounter,
   pieceBudget: number,
-  maxChunkTokens: number,
+  sourceBudget: number,
 ): CharRange[] {
   const pieces: CharRange[] = [];
   for (const segment of lineSegments(text)) {
@@ -282,10 +308,10 @@ function tokenBoundedPieces(
       if (end === -1) {
         end = smallestScalarEnd(text, start);
         const singleTokens = countTokens(text.slice(start, end));
-        if (singleTokens > maxChunkTokens) {
+        if (singleTokens > sourceBudget) {
           throw new Error(
-            'RAG chunker: a single character exceeds maxChunkTokens; ' +
-              'lower overlapTokens or raise maxChunkTokens',
+            'RAG chunker: a single character exceeds the source-text token ' +
+              'budget; lower overlapTokens or raise maxChunkTokens',
           );
         }
       }
