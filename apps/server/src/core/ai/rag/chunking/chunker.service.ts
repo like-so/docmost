@@ -28,7 +28,11 @@ export class RagChunker implements Chunker {
       profile.embedding.tokenizerId,
       profile.embedding.model,
     );
-    const countTokens: TokenCounter = (text) => encoding.encode(text).length;
+    // Source text is ordinary text: empty allowed/disallowed special-token
+    // sets keep literals like "<|endoftext|>" from being interpreted as
+    // model control tokens or rejected.
+    const countTokens: TokenCounter = (text) =>
+      encoding.encode(text, [], []).length;
 
     const chunks: Chunk[] = [];
     let ordinal = 0;
@@ -40,6 +44,7 @@ export class RagChunker implements Chunker {
         profile.overlapTokens,
       );
       for (const range of ranges) {
+        const chunkOrdinal = ordinal++;
         const text = section.text.slice(range.start, range.end);
         const locator: ChunkLocator = {
           pageId: document.key.pageId,
@@ -56,8 +61,14 @@ export class RagChunker implements Chunker {
           textHash: section.textHash,
         };
         chunks.push({
-          chunkId: computeChunkId(document, profile.profileHash, locator, text),
-          ordinal: ordinal++,
+          chunkId: computeChunkId(
+            document,
+            profile.profileHash,
+            locator,
+            text,
+            chunkOrdinal,
+          ),
+          ordinal: chunkOrdinal,
           text,
           tokenCount: countTokens(text),
           locator,
@@ -111,13 +122,16 @@ function validateChunkProfile(profile: IndexProfile): void {
 
 /**
  * Chunk identity is deterministic from the document revision, source
- * locator, text and profile: the same inputs always produce the same id.
+ * locator, text, profile and the chunk's ordinal within the batch: the same
+ * inputs always produce the same id, and identical repeated sections still
+ * get distinct primary keys.
  */
 function computeChunkId(
   document: NormalizedDocument,
   profileHash: string,
   locator: ChunkLocator,
   text: string,
+  chunkOrdinal: number,
 ): string {
   return sha256Hex(
     [
@@ -125,6 +139,7 @@ function computeChunkId(
       document.key.pageId,
       document.inputRevision,
       profileHash,
+      String(chunkOrdinal),
       locator.pageId,
       locator.attachmentId ?? '',
       JSON.stringify(locator.headingPath),
@@ -138,12 +153,41 @@ function computeChunkId(
   );
 }
 
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/**
+ * True when index is not the second utf16 unit of a surrogate pair, so
+ * slicing at index keeps whole Unicode scalar values. Offsets stay in the
+ * approved utf16 coordinate unit.
+ */
+function isScalarBoundary(text: string, index: number): boolean {
+  if (index <= 0 || index >= text.length) {
+    return true;
+  }
+  return !(
+    isHighSurrogate(text.charCodeAt(index - 1)) &&
+    isLowSurrogate(text.charCodeAt(index))
+  );
+}
+
+/** Smallest scalar-boundary end greater than start. */
+function smallestScalarEnd(text: string, start: number): number {
+  return isScalarBoundary(text, start + 1) ? start + 1 : start + 2;
+}
+
 /**
  * Splits a section into half-open utf16 ranges, each within the token
  * budget. Line boundaries are the preferred structural split points; a line
  * longer than the budget is hard-split by binary search on character
- * offsets so chunk text always equals the exact section slice. The final
- * range always reaches the section end: no tail text is lost.
+ * offsets at Unicode scalar boundaries so chunk text always equals the
+ * exact section slice. The final range always reaches the section end: no
+ * tail text is lost.
  */
 function splitSectionRanges(
   text: string,
@@ -161,7 +205,12 @@ function splitSectionRanges(
   // Pieces leave room for the overlap so a carried suffix never pushes the
   // next chunk over the budget.
   const pieceBudget = maxChunkTokens - overlapTokens;
-  const pieces = tokenBoundedPieces(text, countTokens, pieceBudget);
+  const pieces = tokenBoundedPieces(
+    text,
+    countTokens,
+    pieceBudget,
+    maxChunkTokens,
+  );
   const ranges: CharRange[] = [];
   let chunkStart = pieces[0].start;
   let packedEnd = chunkStart;
@@ -204,12 +253,16 @@ function splitSectionRanges(
 /**
  * Expands line segments into pieces that each fit the given token budget.
  * Pieces are half-open, adjacent and non-overlapping, covering the section
- * text without gaps.
+ * text without gaps. A character that does not fit the overlap-adjusted
+ * budget is emitted alone when it still fits maxChunkTokens; when no
+ * complete character fits either limit the split fails explicitly instead
+ * of emitting over-budget or invalid text.
  */
 function tokenBoundedPieces(
   text: string,
   countTokens: TokenCounter,
   pieceBudget: number,
+  maxChunkTokens: number,
 ): CharRange[] {
   const pieces: CharRange[] = [];
   for (const segment of lineSegments(text)) {
@@ -219,13 +272,23 @@ function tokenBoundedPieces(
     }
     let start = segment.start;
     while (start < segment.end) {
-      const end = largestEndWithinBudget(
+      let end = largestEndWithinBudget(
         text,
         start,
         segment.end,
         countTokens,
         pieceBudget,
       );
+      if (end === -1) {
+        end = smallestScalarEnd(text, start);
+        const singleTokens = countTokens(text.slice(start, end));
+        if (singleTokens > maxChunkTokens) {
+          throw new Error(
+            'RAG chunker: a single character exceeds maxChunkTokens; ' +
+              'lower overlapTokens or raise maxChunkTokens',
+          );
+        }
+      }
       pieces.push({ start, end });
       start = end;
     }
@@ -249,7 +312,12 @@ function lineSegments(text: string): CharRange[] {
   }
 }
 
-/** Largest end <= limit with tokenCount(text.slice(start, end)) <= budget. */
+/**
+ * Largest scalar-boundary end <= limit with
+ * tokenCount(text.slice(start, end)) <= budget, or -1 when no complete
+ * character fits the budget. The binary search skips utf16 positions inside
+ * surrogate pairs and never returns an over-budget end.
+ */
 function largestEndWithinBudget(
   text: string,
   start: number,
@@ -259,14 +327,19 @@ function largestEndWithinBudget(
 ): number {
   let low = start + 1;
   let high = limit;
-  let best = start + 1;
+  let best = -1;
   while (low <= high) {
     const mid = (low + high) >> 1;
-    if (countTokens(text.slice(start, mid)) <= budget) {
-      best = mid;
+    const candidate = isScalarBoundary(text, mid) ? mid : mid - 1;
+    if (candidate < low) {
       low = mid + 1;
+      continue;
+    }
+    if (countTokens(text.slice(start, candidate)) <= budget) {
+      best = candidate;
+      low = candidate + 1;
     } else {
-      high = mid - 1;
+      high = candidate - 1;
     }
   }
   return best;
@@ -275,8 +348,9 @@ function largestEndWithinBudget(
 /**
  * Chooses the next chunk start so it overlaps the previous chunk by at most
  * the overlap budget, preferring line-piece boundaries. Falls back to a
- * character binary search for the longest suffix that fits the budget, and
- * to no overlap when nothing fits, so progress is always guaranteed.
+ * character binary search at scalar boundaries for the longest suffix whose
+ * actual token count fits the budget, and to no overlap when nothing fits,
+ * so progress is always guaranteed.
  */
 function overlapStart(
   text: string,
@@ -292,7 +366,6 @@ function overlapStart(
   }
 
   let start = packedEnd;
-  let acc = 0;
   for (let j = nextPieceIndex - 1; j >= 0; j--) {
     const piece = pieces[j];
     if (piece.end !== start) {
@@ -301,14 +374,16 @@ function overlapStart(
     if (piece.start < currentChunkStart) {
       break;
     }
-    const tokens = countTokens(text.slice(piece.start, piece.end));
-    if (acc + tokens > overlapBudget) {
+    if (countTokens(text.slice(piece.start, packedEnd)) > overlapBudget) {
       break;
     }
-    acc += tokens;
     start = piece.start;
   }
-  if (start > currentChunkStart && start < packedEnd) {
+  if (
+    start > currentChunkStart &&
+    start < packedEnd &&
+    countTokens(text.slice(start, packedEnd)) <= overlapBudget
+  ) {
     return start;
   }
 
@@ -319,11 +394,16 @@ function overlapStart(
   let best = -1;
   while (low <= high) {
     const mid = (low + high) >> 1;
-    if (countTokens(text.slice(mid, packedEnd)) <= overlapBudget) {
-      best = mid;
-      high = mid - 1;
-    } else {
+    const candidate = isScalarBoundary(text, mid) ? mid : mid - 1;
+    if (candidate < low) {
       low = mid + 1;
+      continue;
+    }
+    if (countTokens(text.slice(candidate, packedEnd)) <= overlapBudget) {
+      best = candidate;
+      high = candidate - 1;
+    } else {
+      low = candidate + 1;
     }
   }
   if (best > currentChunkStart && best < packedEnd) {

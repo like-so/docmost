@@ -51,6 +51,20 @@ describe('RagChunker', () => {
 
       expect(second).toEqual(first);
     });
+
+    it('counts literal special-token text as ordinary text', async () => {
+      const text = 'Before __END__ after.';
+      const document = makeDocument([pageSection([], null, text)]);
+
+      const batch = await chunker.split(document, makeProfile());
+
+      expect(batch.chunks).toHaveLength(1);
+      expect(batch.chunks[0].text).toBe(text);
+      const encoding = resolveEncoding('o200k_base', '');
+      expect(batch.chunks[0].tokenCount).toBe(
+        encoding.encode(text, [], []).length,
+      );
+    });
   });
 
   describe('oversize sections', () => {
@@ -128,6 +142,40 @@ describe('RagChunker', () => {
         expect(covered[i][0]).toBeLessThan(covered[i - 1][1]);
       }
     });
+
+    it('splits only at Unicode scalar boundaries in surrogate-heavy text', async () => {
+      const text = String.fromCodePoint(0x10348).repeat(4);
+      const document = makeDocument([pageSection([], null, text)]);
+      const profile = makeProfile({ maxChunkTokens: 4, overlapTokens: 1 });
+
+      const batch = await chunker.split(document, profile);
+
+      expect(batch.chunks.length).toBeGreaterThan(1);
+      const section = document.sections[0];
+      for (const chunk of batch.chunks) {
+        expect(section.text.slice(chunk.locator.start, chunk.locator.end)).toBe(
+          chunk.text,
+        );
+        expect(hasIsolatedSurrogate(chunk.text)).toBe(false);
+        expect(chunk.tokenCount).toBeLessThanOrEqual(4);
+      }
+      expect(batch.chunks[0].locator.start).toBe(0);
+      expect(batch.chunks[batch.chunks.length - 1].locator.end).toBe(
+        text.length,
+      );
+    });
+
+    it('fails explicitly when no complete character fits the token limits', async () => {
+      const text = String.fromCodePoint(0x2603).repeat(2);
+      const document = makeDocument([pageSection([], null, text)]);
+      const profile = makeProfile({
+        maxChunkTokens: 1,
+        overlapTokens: 0,
+        embedding: { ...makeProfile().embedding, maxInputTokens: 1 },
+      });
+
+      await expect(chunker.split(document, profile)).rejects.toThrow();
+    });
   });
 
   describe('identity and sources', () => {
@@ -165,6 +213,18 @@ describe('RagChunker', () => {
       expect(newProfile.chunks[0].chunkId).not.toBe(base.chunks[0].chunkId);
       expect(newProfile.profileHash).toBe('profile-hash-2');
       expect(base.inputRevision).toBe('7');
+    });
+
+    it('gives identical repeated sections distinct chunk ids', async () => {
+      const document = makeDocument([
+        pageSection(['Notes'], null, 'Repeated section text.'),
+        pageSection(['Notes'], null, 'Repeated section text.'),
+      ]);
+
+      const batch = await chunker.split(document, makeProfile());
+
+      expect(batch.chunks).toHaveLength(2);
+      expect(batch.chunks[0].chunkId).not.toBe(batch.chunks[1].chunkId);
     });
 
     it('returns an empty batch for a document without sections', async () => {
@@ -296,4 +356,31 @@ function attachmentSection(
 
 function sha256Test(text: string): string {
   return sha256Hex(text);
+}
+
+function isHighSurrogateCode(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogateCode(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+function hasIsolatedSurrogate(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (
+      isHighSurrogateCode(code) &&
+      (i + 1 === text.length || !isLowSurrogateCode(text.charCodeAt(i + 1)))
+    ) {
+      return true;
+    }
+    if (
+      isLowSurrogateCode(code) &&
+      (i === 0 || !isHighSurrogateCode(text.charCodeAt(i - 1)))
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
