@@ -80,6 +80,7 @@ import { RagSourceReader } from './rag-source.reader';
     ctx: TestContext,
     fileName: string,
     bytes: Buffer,
+    createdAt?: Date,
   ) => {
     const attachmentId = randomUUID();
     const filePath = `workspaces/${ctx.workspaceId}/attachments/${attachmentId}/${fileName}`;
@@ -97,6 +98,7 @@ import { RagSourceReader } from './rag-source.reader';
         fileExt: fileName.split('.').pop() ?? 'bin',
         fileSize: String(bytes.length),
         mimeType: 'text/plain',
+        createdAt,
       })
       .execute();
     return attachmentId;
@@ -160,15 +162,19 @@ import { RagSourceReader } from './rag-source.reader';
   it('returns the committed snapshot with byte-level attachment hashes', async () => {
     await withRagTestDb(async (db) => {
       const ctx = await setupContext(db);
+      // Distinct createdAt values pin the reader's (createdAt, id) ordering
+      // instead of relying on random attachment ids to sort lexicographically.
       const first = await seedAttachment(
         ctx,
         'a.txt',
         Buffer.from('alpha bytes'),
+        new Date(Date.now() - 2000),
       );
       const second = await seedAttachment(
         ctx,
         'b.txt',
         Buffer.from('beta bytes'),
+        new Date(Date.now() - 1000),
       );
       const request = await record(ctx, 'upsert', 'page');
 
@@ -186,11 +192,12 @@ import { RagSourceReader } from './rag-source.reader';
       expect(snapshot.spaceId).toBe(ctx.spaceId);
       expect(snapshot.bodyJson).toEqual(docWithText('reader spec body'));
       expect(snapshot.bodyText).toBe('reader spec body');
-      expect(snapshot.attachments.map((a) => a.attachmentId)).toEqual(
-        [first, second].sort(),
-      );
+      expect(snapshot.attachments.map((a) => a.attachmentId)).toEqual([
+        first,
+        second,
+      ]);
       expect(snapshot.attachments[0]).toMatchObject({
-        attachmentId: [first, second].sort()[0],
+        attachmentId: first,
         fileName: 'a.txt',
         mimeType: 'text/plain',
         byteSize: 11,
