@@ -104,6 +104,15 @@ import { GeneralQueueProcessor } from './processors/general-queue.processor';
       },
     }),
     BullModule.registerQueue({
+      name: QueueName.RAG_QUEUE,
+      defaultJobOptions: {
+        removeOnComplete: true,
+        removeOnFail: true,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 20 * 1000 },
+      },
+    }),
+    BullModule.registerQueue({
       name: QueueName.BASE_QUEUE,
       defaultJobOptions: {
         attempts: 2,
