@@ -275,6 +275,27 @@ export class PageRepo {
           .execute();
 
         await trx.deleteFrom('shares').where('pageId', 'in', pageIds).execute();
+
+        // Record the delete for every row this update actually soft-deleted,
+        // in the same transaction so a rollback leaves no RAG event.
+        const deletedRows = await trx
+          .selectFrom('pages')
+          .select(['id', 'workspaceId'])
+          .where('id', 'in', pageIds)
+          .where('deletedAt', '=', currentDate)
+          .execute();
+
+        const recorded = new Set<string>();
+        for (const deletedRow of deletedRows) {
+          if (recorded.has(deletedRow.id)) continue;
+          recorded.add(deletedRow.id);
+          await this.sourceLedger.recordChange(
+            trx,
+            { workspaceId: deletedRow.workspaceId, pageId: deletedRow.id },
+            'delete',
+            'page',
+          );
+        }
       });
 
       this.eventEmitter.emit(EventName.PAGE_SOFT_DELETED, {
@@ -329,21 +350,47 @@ export class PageRepo {
 
     const pageIds = pages.map((p) => p.id);
 
-    // Restore all pages, but only detach the root page if its parent is deleted
-    await this.db
-      .updateTable('pages')
-      .set({ deletedById: null, deletedAt: null })
-      .where('id', 'in', pageIds)
-      .execute();
-
-    // If we need to detach the restored page from its deleted parent
-    if (shouldDetachFromParent) {
-      await this.db
-        .updateTable('pages')
-        .set({ parentPageId: null })
-        .where('id', '=', pageId)
+    // Restore, optional detach and the RAG records commit atomically so a
+    // restored subtree always re-advances its desired revisions.
+    await executeTx(this.db, async (trx) => {
+      const restoredRows = await trx
+        .selectFrom('pages')
+        .select(['id', 'workspaceId'])
+        .where('id', 'in', pageIds)
+        .where('deletedAt', 'is not', null)
         .execute();
-    }
+
+      // Restore all pages, but only detach the root page if its parent is
+      // deleted
+      await trx
+        .updateTable('pages')
+        .set({ deletedById: null, deletedAt: null })
+        .where('id', 'in', pageIds)
+        .execute();
+
+      // If we need to detach the restored page from its deleted parent
+      if (shouldDetachFromParent) {
+        await trx
+          .updateTable('pages')
+          .set({ parentPageId: null })
+          .where('id', '=', pageId)
+          .execute();
+      }
+
+      // Record only the rows this restore actually un-deleted; pages that
+      // were never deleted have no source change.
+      const recorded = new Set<string>();
+      for (const restoredRow of restoredRows) {
+        if (recorded.has(restoredRow.id)) continue;
+        recorded.add(restoredRow.id);
+        await this.sourceLedger.recordChange(
+          trx,
+          { workspaceId: restoredRow.workspaceId, pageId: restoredRow.id },
+          'upsert',
+          'restore',
+        );
+      }
+    });
     this.eventEmitter.emit(EventName.PAGE_RESTORED, {
       pageIds: pageIds,
       workspaceId: workspaceId,

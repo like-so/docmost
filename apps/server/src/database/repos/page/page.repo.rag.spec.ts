@@ -148,5 +148,148 @@ import { RagStateRepository } from '../../../core/ai/rag/persistence/rag-state.r
         expect(await countRows(db, 'ragOutbox')).toBe(0);
       });
     });
+
+    const seedUser = async (db: Kysely<DbInterface>, workspaceId: string) => {
+      const userId = randomUUID();
+      await db
+        .insertInto('users')
+        .values({
+          id: userId,
+          workspaceId,
+          email: `${userId}@rag-test.local`,
+          name: 'rag-tester',
+        })
+        .execute();
+      return userId;
+    };
+
+    const seedPageTree = async (
+      db: Kysely<DbInterface>,
+      workspaceId: string,
+    ) => {
+      const parentId = randomUUID();
+      const childId = randomUUID();
+      await seedPage(db, workspaceId, parentId);
+      await seedPage(db, workspaceId, childId);
+      await db
+        .updateTable('pages')
+        .set({ parentPageId: parentId })
+        .where('id', '=', childId)
+        .execute();
+      return { parentId, childId };
+    };
+
+    const pageDeletedFlags = async (
+      db: Kysely<DbInterface>,
+      pageIds: string[],
+    ) => {
+      const rows = await db
+        .selectFrom('pages')
+        .select(['id', 'deletedAt'])
+        .where('id', 'in', pageIds)
+        .execute();
+      return new Map(rows.map((row) => [row.id, row.deletedAt !== null]));
+    };
+
+    it('records a delete for every soft-deleted subtree id atomically', async () => {
+      await withRagTestDb(async (db) => {
+        const workspaceId = randomUUID();
+        await seedWorkspace(db, workspaceId);
+        const userId = await seedUser(db, workspaceId);
+        const { parentId, childId } = await seedPageTree(db, workspaceId);
+        const { stateRepository, pageRepo } = buildRepo(db);
+
+        await pageRepo.removePage(parentId, userId, workspaceId);
+
+        const deleted = await pageDeletedFlags(db, [parentId, childId]);
+        expect(deleted.get(parentId)).toBe(true);
+        expect(deleted.get(childId)).toBe(true);
+
+        for (const pageId of [parentId, childId]) {
+          const state = await stateRepository.find(db, {
+            workspaceId,
+            pageId,
+          });
+          expect(state?.desiredInputRevision).toBe('1');
+          expect(state?.lastOperation).toBe('delete');
+          expect(state?.sourceStatus).toBe('deleted');
+        }
+
+        const outboxRepository = new RagOutboxRepository(db);
+        const pending = await outboxRepository.pending(db, 10);
+        expect(pending).toHaveLength(2);
+        expect(new Set(pending.map((r) => r.key.pageId))).toEqual(
+          new Set([parentId, childId]),
+        );
+        expect(pending.every((r) => r.operation === 'delete')).toBe(true);
+      });
+    });
+
+    it('leaves nothing when subtree delete recording fails', async () => {
+      await withRagTestDb(async (db) => {
+        const workspaceId = randomUUID();
+        await seedWorkspace(db, workspaceId);
+        const userId = await seedUser(db, workspaceId);
+        const { parentId, childId } = await seedPageTree(db, workspaceId);
+        const failingLedger = {
+          recordChange: async () => {
+            throw new Error('forced failure');
+          },
+        } as unknown as RagSourceLedger;
+        const pageRepo = new PageRepo(
+          db,
+          {} as SpaceMemberRepo,
+          stubEmitter,
+          failingLedger,
+        );
+
+        await expect(
+          pageRepo.removePage(parentId, userId, workspaceId),
+        ).rejects.toThrow('forced failure');
+
+        const deleted = await pageDeletedFlags(db, [parentId, childId]);
+        expect(deleted.get(parentId)).toBe(false);
+        expect(deleted.get(childId)).toBe(false);
+        expect(await countRows(db, 'ragSourceState')).toBe(0);
+        expect(await countRows(db, 'ragOutbox')).toBe(0);
+      });
+    });
+
+    it('records restore and re-advances the desired revision', async () => {
+      await withRagTestDb(async (db) => {
+        const workspaceId = randomUUID();
+        await seedWorkspace(db, workspaceId);
+        const userId = await seedUser(db, workspaceId);
+        const { parentId, childId } = await seedPageTree(db, workspaceId);
+        const { stateRepository, pageRepo } = buildRepo(db);
+
+        await pageRepo.removePage(parentId, userId, workspaceId);
+        await pageRepo.restorePage(parentId, workspaceId);
+
+        const deleted = await pageDeletedFlags(db, [parentId, childId]);
+        expect(deleted.get(parentId)).toBe(false);
+        expect(deleted.get(childId)).toBe(false);
+
+        for (const pageId of [parentId, childId]) {
+          const state = await stateRepository.find(db, {
+            workspaceId,
+            pageId,
+          });
+          expect(state?.desiredInputRevision).toBe('2');
+          expect(state?.lastCause).toBe('restore');
+          expect(state?.sourceStatus).toBe('live');
+        }
+
+        const outboxRepository = new RagOutboxRepository(db);
+        const pending = await outboxRepository.pending(db, 10);
+        expect(pending).toHaveLength(4);
+        const restored = pending.filter((r) => r.cause === 'restore');
+        expect(restored).toHaveLength(2);
+        expect(new Set(restored.map((r) => r.key.pageId))).toEqual(
+          new Set([parentId, childId]),
+        );
+        expect(restored.every((r) => r.operation === 'upsert')).toBe(true);
+      });
+    });
   },
 );
