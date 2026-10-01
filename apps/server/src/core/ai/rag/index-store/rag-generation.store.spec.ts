@@ -254,6 +254,83 @@ import { RagGenerationQuery } from './rag-generation-query';
     });
   });
 
+  it('resolves concurrent empty stages to one generation', async () => {
+    await setup(async (ctx) => {
+      await advance(ctx, 'upsert');
+      const { batch, embeddingBatch } = makeBatch(ctx, {
+        revision: '1',
+        profileHash: 'profile-a',
+        texts: [],
+      });
+      // Chunk-less batches have no deterministic chunk rows to collide on,
+      // so serialization must come from the source-state row lock.
+      const results = await Promise.all([
+        ctx.store.stage(batch, embeddingBatch),
+        ctx.store.stage(batch, embeddingBatch),
+      ]);
+      expect(results[0].generationId).toBe(results[1].generationId);
+      expect(results[0].chunkCount).toBe(0);
+      expect(await listGenerations(ctx)).toHaveLength(1);
+    });
+  });
+
+  it('reports the guarded outcome for a replayed publication', async () => {
+    await setup(async (ctx) => {
+      await advance(ctx, 'upsert');
+      const { generationId } = await stageAndPublish(ctx, {
+        revision: '1',
+        profileHash: 'profile-a',
+        texts: ['revision one'],
+      });
+
+      // A newer desired edit makes the replay stale even though the
+      // publication pointer still references this generation.
+      await advance(ctx, 'upsert');
+      await expect(
+        ctx.store.publishIfCurrent(
+          ctx.key,
+          toInputRevision('1'),
+          'profile-a',
+          generationId,
+        ),
+      ).resolves.toBe('superseded');
+
+      // A deleted source cannot be resurrected by replay.
+      const second = await stageAndPublish(ctx, {
+        revision: '2',
+        profileHash: 'profile-a',
+        texts: ['revision two'],
+      });
+      await advance(ctx, 'delete');
+      await expect(
+        ctx.store.publishIfCurrent(
+          ctx.key,
+          toInputRevision('2'),
+          'profile-a',
+          second.generationId,
+        ),
+      ).resolves.toBe('deleted');
+
+      // A disabled profile blocks replay. The delete and restore advances
+      // above moved desiredInputRevision to '4'.
+      await advance(ctx, 'upsert', 'restore');
+      const third = await stageAndPublish(ctx, {
+        revision: '4',
+        profileHash: 'profile-a',
+        texts: ['revision three'],
+      });
+      await setProfileEnabled(ctx, 'profile-a', false);
+      await expect(
+        ctx.store.publishIfCurrent(
+          ctx.key,
+          toInputRevision('4'),
+          'profile-a',
+          third.generationId,
+        ),
+      ).resolves.toBe('disabled');
+    });
+  });
+
   it('rejects an embedding batch with a mismatched profile hash without writing', async () => {
     await setup(async (ctx) => {
       await advance(ctx, 'upsert');

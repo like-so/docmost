@@ -58,6 +58,17 @@ export class RagGenerationStore implements GenerationStore {
 
     try {
       return await this.db.transaction().execute(async (trx) => {
+        // Serialize per source with the foundation lock order (source row
+        // first): concurrent duplicate stages, including chunk-less ones,
+        // must resolve to a single generation instead of racing inserts.
+        await trx
+          .selectFrom('ragSourceState')
+          .select('pageId')
+          .where('workspaceId', '=', batch.key.workspaceId)
+          .where('pageId', '=', batch.key.pageId)
+          .forUpdate()
+          .executeTakeFirst();
+
         const existing = await trx
           .selectFrom('ragGenerations')
           .selectAll()
@@ -166,10 +177,20 @@ export class RagGenerationStore implements GenerationStore {
       const state = await this.stateRepository.find(trx, key);
       if (
         generation.status === 'published' &&
-        state?.publishedGenerationId === generationId &&
-        state.publishedInputRevision === inputRevision
+        state?.sourceStatus === 'live' &&
+        state.publishedGenerationId === generationId &&
+        state.publishedInputRevision === inputRevision &&
+        state.desiredInputRevision === inputRevision
       ) {
-        return 'published';
+        // Replay is a no-op only while every publication guard still holds;
+        // otherwise the CAS below reports the current guarded outcome.
+        const profile = await this.stateRepository.findWorkspaceProfile(
+          trx,
+          key.workspaceId,
+        );
+        if (profile?.enabled && profile.profileHash === profileHash) {
+          return 'published';
+        }
       }
 
       const outcome = await this.stateRepository.compareAndSwapPublication(

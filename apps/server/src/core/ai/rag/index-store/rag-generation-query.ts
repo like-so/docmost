@@ -1,7 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { sql } from 'kysely';
 import { KyselyDB } from '@docmost/db/types/kysely.types';
-import { ChunkLocator, RagEvidence, toInputRevision } from '../contracts';
+import {
+  ChunkLocator,
+  RagError,
+  RagEvidence,
+  toInputRevision,
+} from '../contracts';
 
 export interface RagQueryScope {
   workspaceId: string;
@@ -33,6 +38,37 @@ interface ActiveChunkRow {
 function assertLimit(limit: number): void {
   if (!Number.isInteger(limit) || limit <= 0) {
     throw new Error(`limit must be a positive integer, got ${limit}`);
+  }
+}
+
+/**
+ * A query embedding must be comparable to stored chunk vectors: non-empty,
+ * finite and not all zeros. Otherwise cosine similarity silently degrades
+ * (truncated comparison, zero or non-finite scores) instead of rejecting
+ * the invalid input.
+ */
+function assertQueryEmbedding(values: number[]): void {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new RagError(
+      'EMBEDDING_RESPONSE_INVALID',
+      'Query embedding must be a non-empty vector',
+    );
+  }
+  let nonzero = false;
+  for (const value of values) {
+    if (!Number.isFinite(value)) {
+      throw new RagError(
+        'EMBEDDING_RESPONSE_INVALID',
+        'Query embedding contains a non-finite value',
+      );
+    }
+    if (value !== 0) nonzero = true;
+  }
+  if (!nonzero) {
+    throw new RagError(
+      'EMBEDDING_RESPONSE_INVALID',
+      'Query embedding is all zeros',
+    );
   }
 }
 
@@ -120,7 +156,7 @@ export class RagGenerationQuery {
     params: SemanticQueryParams,
   ): Promise<RagEvidence[]> {
     assertLimit(params.limit);
-    if (params.values.length === 0) return [];
+    assertQueryEmbedding(params.values);
 
     const rows = await this.activeChunks(db, params.workspaceId, params)
       .where('g.profileHash', '=', params.profileHash)
@@ -139,6 +175,9 @@ export class RagGenerationQuery {
     for (const row of rows) {
       const embedding = row.embedding;
       if (!Array.isArray(embedding)) continue;
+      // Vectors of different dimensions are not comparable; comparing the
+      // shared prefix would silently score a truncated projection.
+      if ((embedding as number[]).length !== params.values.length) continue;
       const value = cosineSimilarity(embedding as number[], params.values);
       if (!Number.isFinite(value)) continue;
       scored.push({ row: row as ActiveChunkRow, value });

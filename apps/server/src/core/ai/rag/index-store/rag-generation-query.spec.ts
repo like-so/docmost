@@ -396,4 +396,47 @@ import { RagGenerationQuery } from './rag-generation-query';
       );
     });
   });
+
+  it('rejects invalid query embeddings', async () => {
+    await setup(async (ctx) => {
+      const page: SeededPage = {
+        pageId: randomUUID(),
+        spaceId: randomUUID(),
+      };
+      await seedPageInSpace(ctx.db, ctx.workspaceId, page.spaceId, page.pageId);
+      await advance(ctx, page.pageId, 'upsert');
+      await stageAndPublish(ctx, page, '1', 'profile-a', [
+        { text: 'alpha content block', values: [1, 0, 0] },
+      ]);
+
+      await expect(semantic(ctx, { values: [] })).rejects.toThrow(
+        'Query embedding',
+      );
+      await expect(semantic(ctx, { values: [0, 0, 0] })).rejects.toThrow(
+        'all zeros',
+      );
+      await expect(
+        semantic(ctx, { values: [1, 0, Number.NaN] }),
+      ).rejects.toThrow('non-finite');
+    });
+  });
+
+  it('ignores chunks whose embedding dimensions differ from the query', async () => {
+    await setup(async (ctx) => {
+      const page: SeededPage = {
+        pageId: randomUUID(),
+        spaceId: randomUUID(),
+      };
+      await seedPageInSpace(ctx.db, ctx.workspaceId, page.spaceId, page.pageId);
+      await advance(ctx, page.pageId, 'upsert');
+      await stageAndPublish(ctx, page, '1', 'profile-a', [
+        { text: 'alpha content block', values: [1, 0, 0] },
+      ]);
+
+      // A two-dimensional query cannot be compared to three-dimensional
+      // chunk vectors: prefix scoring would return fabricated evidence.
+      expect(await semantic(ctx, { values: [1, 0] })).toEqual([]);
+      expect(await semantic(ctx, { values: [1, 0, 0] })).toHaveLength(1);
+    });
+  });
 });
