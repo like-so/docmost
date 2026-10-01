@@ -174,21 +174,39 @@ export class RagGenerationStore implements GenerationStore {
           : 'deleted';
       }
 
-      const state = await this.stateRepository.find(trx, key);
-      if (
-        generation.status === 'published' &&
-        state?.sourceStatus === 'live' &&
-        state.publishedGenerationId === generationId &&
-        state.publishedInputRevision === inputRevision &&
-        state.desiredInputRevision === inputRevision
-      ) {
-        // Replay is a no-op only while every publication guard still holds;
-        // otherwise the CAS below reports the current guarded outcome.
+      if (generation.status === 'published') {
+        // The replay decision must not combine unlocked snapshots: hold the
+        // foundation lock order (source row FOR UPDATE, then profile FOR
+        // SHARE) while reading the pointer and profile, so a concurrent
+        // source change or profile change either commits before this
+        // decision or waits for it to finish.
+        await trx
+          .selectFrom('ragSourceState')
+          .select('pageId')
+          .where('workspaceId', '=', key.workspaceId)
+          .where('pageId', '=', key.pageId)
+          .forUpdate()
+          .executeTakeFirst();
+        await trx
+          .selectFrom('ragWorkspaceProfile')
+          .select('workspaceId')
+          .where('workspaceId', '=', key.workspaceId)
+          .forShare()
+          .executeTakeFirst();
+
+        const state = await this.stateRepository.find(trx, key);
         const profile = await this.stateRepository.findWorkspaceProfile(
           trx,
           key.workspaceId,
         );
-        if (profile?.enabled && profile.profileHash === profileHash) {
+        if (
+          state?.sourceStatus === 'live' &&
+          state.publishedGenerationId === generationId &&
+          state.publishedInputRevision === inputRevision &&
+          state.desiredInputRevision === inputRevision &&
+          profile?.enabled &&
+          profile.profileHash === profileHash
+        ) {
           return 'published';
         }
       }

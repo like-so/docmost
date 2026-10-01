@@ -6,6 +6,7 @@ import {
   ChunkBatch,
   ChunkLocator,
   EmbeddingBatchResult,
+  PublishOutcome,
   toInputRevision,
 } from '../contracts';
 import { RagStateRepository } from '../persistence/rag-state.repository';
@@ -328,6 +329,50 @@ import { RagGenerationQuery } from './rag-generation-query';
           third.generationId,
         ),
       ).resolves.toBe('disabled');
+    });
+  });
+
+  it('does not settle a replay to published across an uncommitted source change', async () => {
+    await setup(async (ctx) => {
+      await advance(ctx, 'upsert');
+      const { generationId } = await stageAndPublish(ctx, {
+        revision: '1',
+        profileHash: 'profile-a',
+        texts: ['revision one'],
+      });
+
+      // Interleaving under review: while the replay decides, another
+      // transaction advances the source and the profile stays enabled. The
+      // replay decision must hold the foundation source-row lock, so it can
+      // never answer published from pre-change snapshots.
+      let raceTimer: NodeJS.Timeout | undefined;
+      let replay: Promise<PublishOutcome> | undefined;
+      await ctx.db.transaction().execute(async (trx) => {
+        await ctx.stateRepo.advanceForChange(trx, ctx.key, 'upsert', 'page');
+        replay = ctx.store.publishIfCurrent(
+          ctx.key,
+          toInputRevision('1'),
+          'profile-a',
+          generationId,
+        );
+        const raced = await Promise.race([
+          replay.then(
+            () => 'settled' as const,
+            () => 'rejected' as const,
+          ),
+          new Promise<'timeout'>((resolve) => {
+            raceTimer = setTimeout(() => resolve('timeout'), 150);
+          }),
+        ]);
+        expect(raced).toBe('timeout');
+      });
+      if (raceTimer) clearTimeout(raceTimer);
+
+      // The concurrent advance has now committed and the profile is enabled:
+      // the replay that started before the change reports the guarded
+      // current outcome, not a stale published.
+      await enableProfile(ctx, 'profile-a');
+      await expect(replay).resolves.toBe('superseded');
     });
   });
 
