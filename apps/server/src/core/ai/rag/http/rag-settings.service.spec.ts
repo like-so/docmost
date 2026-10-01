@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { BadRequestException } from '@nestjs/common';
 import { Kysely } from 'kysely';
 import { DbInterface } from '@docmost/db/types/db.interface';
+import { Workspace } from '@docmost/db/types/entity.types';
 import {
   ragTestDbConfigured,
   seedWorkspace,
@@ -89,7 +90,8 @@ jest.setTimeout(30000);
       });
       expect(view.enabled).toBe(true);
       expect(view.indexProfile?.profileHash).toBe(
-        new FixtureProfileValidator().validate(VALID_CONFIG).profileHash,
+        new FixtureProfileValidator().validate({} as Workspace, VALID_CONFIG)
+          .profileHash,
       );
 
       const stored = await service.getSettings({ id: workspaceId } as never);
@@ -177,6 +179,50 @@ jest.setTimeout(30000);
       const view = await service.getSettings({ id: workspaceId } as never);
       expect(view.enabled).toBe(false);
       expect(view.indexProfile).not.toBeNull();
+    });
+  });
+
+  it('persists the validator-normalized config the profile hash was computed over', async () => {
+    await setup(async ({ db, workspaceId }) => {
+      class NormalizingValidator extends FixtureProfileValidator {
+        validate(
+          workspace: Workspace,
+          config: IndexProfileConfig,
+        ): ReturnType<FixtureProfileValidator['validate']> {
+          return super.validate(workspace, {
+            ...config,
+            parserVersion: 'normalized-parser',
+          });
+        }
+      }
+      const service = new RagSettingsService(
+        db,
+        new RagStateRepository(db),
+        new NormalizingValidator(),
+      );
+
+      const view = await service.updateSettings({ id: workspaceId } as never, {
+        enabled: true,
+        indexProfileConfig: VALID_CONFIG,
+      });
+
+      const row = await db
+        .selectFrom('workspaces')
+        .select('settings')
+        .where('id', '=', workspaceId)
+        .executeTakeFirst();
+      const stored = (
+        (row?.settings as Record<string, never>)['rag'] as {
+          indexProfileConfig: IndexProfileConfig;
+        }
+      ).indexProfileConfig;
+      expect(stored.parserVersion).toBe('normalized-parser');
+      // The stored config is byte-identical to the hashed config: re-hashing
+      // it reproduces the persisted profile identity.
+      expect(
+        new FixtureProfileValidator().validate({} as Workspace, stored)
+          .profileHash,
+      ).toBe(view.indexProfile?.profileHash);
     });
   });
 });

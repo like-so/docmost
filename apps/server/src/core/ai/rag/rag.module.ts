@@ -1,6 +1,7 @@
 import { Global, Injectable, Module } from '@nestjs/common';
 import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB } from '@docmost/db/types/kysely.types';
+import { Workspace } from '@docmost/db/types/entity.types';
 import {
   IndexProfile,
   IndexProfileConfig,
@@ -8,6 +9,11 @@ import {
   RagProfileResolver,
 } from './contracts';
 import { computeProfileHash, computeProfileId } from './embedding/profile-hash';
+import {
+  readWorkspaceAiProvider,
+  providerSettingsIdentity,
+} from './embedding/provider-settings';
+import { EncryptionService } from '../../../integrations/encryption/encryption.service';
 import { OpenAiCompatibleEmbeddingAdapter } from './embedding/openai-compatible.embedding.adapter';
 import {
   RagProfileConfigValidator,
@@ -36,14 +42,16 @@ import { RagOutboxRelayService } from './rag-outbox-relay.service';
  * resolver validates asynchronously against stored settings, so this adapter
  * applies the contract 8 shape rules and derives the deterministic profile
  * identity with the embedding component's own hash functions. The
- * client-supplied endpointIdentity is carried through unchanged: the
- * embedding adapter rejects endpoint drift explicitly at embed time, and the
- * recorded cross-component note defers server-side endpointIdentity
- * derivation to the LIKE-244 production validator binding.
+ * endpointIdentity is always derived server-side from the workspace's
+ * authoritative encrypted provider settings; any client-supplied value is
+ * ignored, so the persisted config and the profile hash both carry the same
+ * normalized identity the embedding adapter re-derives at embed time.
  */
 @Injectable()
 export class RagComposedProfileValidator implements RagProfileConfigValidator {
-  validate(config: IndexProfileConfig): IndexProfile {
+  constructor(private readonly encryption: EncryptionService) {}
+
+  validate(workspace: Workspace, config: IndexProfileConfig): IndexProfile {
     if (config.embedding.driver !== 'openai-compatible') {
       throw new RagError(
         'EMBEDDING_NOT_CONFIGURED',
@@ -82,16 +90,6 @@ export class RagComposedProfileValidator implements RagProfileConfigValidator {
       throw new RagError(
         'EMBEDDING_NOT_CONFIGURED',
         'embedding tokenizerId must be a nonempty string or null',
-      );
-    }
-    if (
-      embedding.endpointIdentity !== null &&
-      (typeof embedding.endpointIdentity !== 'string' ||
-        !embedding.endpointIdentity)
-    ) {
-      throw new RagError(
-        'EMBEDDING_NOT_CONFIGURED',
-        'embedding endpointIdentity must be a nonempty string or null',
       );
     }
     if (
@@ -136,9 +134,25 @@ export class RagComposedProfileValidator implements RagProfileConfigValidator {
       throw new RagError('EMBEDDING_NOT_CONFIGURED', 'sourcePolicy is invalid');
     }
 
-    const profileHash = computeProfileHash(config);
-    return {
+    const provider = readWorkspaceAiProvider(workspace, this.encryption);
+    if (!provider) {
+      throw new RagError(
+        'EMBEDDING_NOT_CONFIGURED',
+        'workspace AI provider settings are required for the embedding endpoint',
+      );
+    }
+    // The client-supplied endpointIdentity is never trusted: the normalized
+    // config below is the exact object the profile hash is computed over.
+    const normalized: IndexProfileConfig = {
       ...config,
+      embedding: {
+        ...embedding,
+        endpointIdentity: providerSettingsIdentity(provider),
+      },
+    };
+    const profileHash = computeProfileHash(normalized);
+    return {
+      ...normalized,
       profileId: computeProfileId(profileHash),
       profileHash,
     };
@@ -262,6 +276,12 @@ export class RagComposedProfileResolver implements RagProfileResolver {
     RagProcessor,
     RagOutboxRelayService,
   ],
-  exports: [RagIndexerService, RAG_INDEXER],
+  exports: [
+    RagIndexerService,
+    RAG_INDEXER,
+    RAG_PROFILE_CONFIG_VALIDATOR,
+    RAG_PROFILE_RESOLVER,
+    RAG_EMBEDDING_PORT,
+  ],
 })
 export class RagModule {}

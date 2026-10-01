@@ -8,7 +8,7 @@ import {
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { sql } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
-import { KyselyDB } from '@docmost/db/types/kysely.types';
+import { KyselyDB, KyselyTransaction } from '@docmost/db/types/kysely.types';
 import { Queue } from 'bullmq';
 import { QueueJob, QueueName } from '../../../integrations/queue/constants';
 import { IndexRequest, serializeIndexRequest } from './contracts';
@@ -27,6 +27,8 @@ const RECONCILE_PAGE_BATCH = 200;
 const RECONCILE_INTERVAL_MS = 1000;
 /** Skip stalled-page rescheduling while a recently delivered job may still run. */
 const RECENT_DELIVERY_WINDOW_MS = 5 * 60 * 1000;
+/** Treat staged work at the current profile as abandoned after this window. */
+const STAGED_GRACE_WINDOW_MS = 15 * 60 * 1000;
 
 /**
  * Durable outbox relay (docmost-rag-v1 contracts 3 and 4). Committed ledger
@@ -39,14 +41,24 @@ const RECENT_DELIVERY_WINDOW_MS = 5 * 60 * 1000;
  * worker.
  *
  * The reconcile sweep is persisted-state-driven, so disable/re-enable and
- * profile changes survive restarts without in-memory assumptions:
- * - live pages whose desired revision has no queued, staged or failed work
- *   and no recent delivery are re-requested with a profile cause (covers
- *   events consumed while disabled and deliveries lost to a crash);
- * - enabled workspaces whose published generation no longer matches the
- *   current profile hash schedule a paginated profile reindex of all live
- *   pages (contract 8; mismatched retrieval is already excluded by the
- *   retrieval component).
+ * profile changes survive restarts without in-memory assumptions. Delivered
+ * outbox rows are purged once they leave the recent-delivery dedup window.
+ * Live pages in enabled workspaces whose published state is not at the current
+ * profile, or whose desired revision has no live path to completion, are
+ * re-requested with a profile cause. Scheduling carries a durable
+ * per-target-profile dedup evaluated under the source-state row lock, so
+ * repeated or concurrent sweeps record at most one event per page per profile
+ * generation:
+ * - a pending delivery resolves the current profile when it runs;
+ * - a recently delivered job may still be running while the desired revision
+ *   has no live publication (slow publication is not superseded by later
+ *   sweeps); once the desired revision is published the delivery is complete
+ *   and profile drift alone warrants a new event;
+ * - staged work at the current profile created after the profile row last
+ *   changed is active within the grace window, and abandoned afterwards;
+ * - a durable failed phase at the current profile stays terminal until the
+ *   next settings save, which advances the profile row's updated_at and
+ *   releases both staged and failed work for recovery.
  */
 @Injectable()
 export class RagOutboxRelayService implements OnModuleInit, OnModuleDestroy {
@@ -80,15 +92,38 @@ export class RagOutboxRelayService implements OnModuleInit, OnModuleDestroy {
     if (this.reconciling) return;
     this.reconciling = true;
     try {
+      await this.purgeExpiredDeliveries();
       await this.deliverPending();
       await this.reconcileStalledPages();
-      await this.reconcileProfileChanges();
     } finally {
       this.reconciling = false;
     }
   }
 
   private reconciling = false;
+
+  /**
+   * Delivered outbox rows exist only for the recent-delivery dedup window;
+   * once a delivery leaves that window it no longer suppresses recovery and
+   * the row is garbage. Purging keeps the outbox bounded.
+   */
+  private async purgeExpiredDeliveries(): Promise<void> {
+    try {
+      await this.db
+        .deleteFrom('ragOutbox')
+        .where('status', '=', 'delivered')
+        .where(
+          'deliveredAt',
+          '<',
+          new Date(Date.now() - RECENT_DELIVERY_WINDOW_MS),
+        )
+        .execute();
+    } catch (error) {
+      this.logger.warn(
+        `rag-relay delivered purge failed: ${describeError(error)}`,
+      );
+    }
+  }
 
   private async deliverPending(): Promise<void> {
     let requests: IndexRequest[];
@@ -128,41 +163,13 @@ export class RagOutboxRelayService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async reconcileStalledPages(): Promise<void> {
-    const recentDeliveryCutoff = new Date(
-      Date.now() - RECENT_DELIVERY_WINDOW_MS,
-    );
+    const cutoffs = {
+      recentDelivery: new Date(Date.now() - RECENT_DELIVERY_WINDOW_MS),
+      stagedGrace: new Date(Date.now() - STAGED_GRACE_WINDOW_MS),
+    };
     let candidates;
     try {
-      candidates = await this.db
-        .selectFrom('ragSourceState as s')
-        .select(['s.workspaceId', 's.pageId'])
-        .innerJoin(
-          'ragWorkspaceProfile as wp',
-          'wp.workspaceId',
-          's.workspaceId',
-        )
-        .where('wp.enabled', '=', true)
-        .where('s.sourceStatus', '=', 'live')
-        .where(
-          sql<boolean>`s.published_input_revision is null or s.desired_input_revision > s.published_input_revision`,
-        )
-        .where(
-          sql<boolean>`not exists (
-            select 1 from rag_outbox o
-            where o.workspace_id = s.workspace_id
-              and o.page_id = s.page_id
-              and (o.status = 'pending' or o.delivered_at > ${recentDeliveryCutoff})
-          )`,
-        )
-        .where(
-          sql<boolean>`not exists (
-            select 1 from rag_generations g
-            where g.workspace_id = s.workspace_id
-              and g.page_id = s.page_id
-              and g.input_revision = s.desired_input_revision
-              and g.status in ('staged', 'failed')
-          )`,
-        )
+      candidates = await this.selectReindexCandidates(this.db, cutoffs)
         .limit(RECONCILE_PAGE_BATCH)
         .execute();
     } catch (error) {
@@ -170,83 +177,99 @@ export class RagOutboxRelayService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     for (const candidate of candidates) {
-      await this.recordProfileReindex(candidate.workspaceId, [
-        candidate.pageId,
-      ]);
-    }
-  }
-
-  private async reconcileProfileChanges(): Promise<void> {
-    let workspaces;
-    try {
-      workspaces = await this.db
-        .selectFrom('ragSourceState as s')
-        .select('s.workspaceId')
-        .distinct()
-        .innerJoin(
-          'ragWorkspaceProfile as wp',
-          'wp.workspaceId',
-          's.workspaceId',
-        )
-        .innerJoin('ragGenerations as g', 'g.id', 's.publishedGenerationId')
-        .where('s.sourceStatus', '=', 'live')
-        .where('wp.enabled', '=', true)
-        .where(sql<boolean>`g.profile_hash != wp.profile_hash`)
-        .limit(RECONCILE_PAGE_BATCH)
-        .execute();
-    } catch (error) {
-      this.logger.warn(
-        `rag-relay profile scan failed: ${describeError(error)}`,
-      );
-      return;
-    }
-    for (const row of workspaces) {
-      await this.schedulePaginatedReindex(row.workspaceId);
-    }
-  }
-
-  private async schedulePaginatedReindex(workspaceId: string): Promise<void> {
-    let cursor: string | null = null;
-    for (;;) {
-      let query = this.db
-        .selectFrom('ragSourceState')
-        .select('pageId')
-        .where('workspaceId', '=', workspaceId)
-        .where('sourceStatus', '=', 'live')
-        .orderBy('pageId', 'asc')
-        .limit(RECONCILE_PAGE_BATCH);
-      if (cursor) query = query.where('pageId', '>', cursor);
-      const pages = await query.execute();
-      if (pages.length === 0) break;
       await this.recordProfileReindex(
-        workspaceId,
-        pages.map((page) => page.pageId),
+        candidate.workspaceId,
+        candidate.pageId,
+        cutoffs,
       );
-      if (pages.length < RECONCILE_PAGE_BATCH) break;
-      cursor = pages[pages.length - 1].pageId;
     }
+  }
+
+  /**
+   * Live pages in enabled workspaces whose published state is not at the
+   * current profile, or whose desired revision has no live path to
+   * completion. The NOT EXISTS clauses are the durable per-target-profile
+   * dedup: pending or recent deliveries, staged work at the current profile
+   * within its grace window, and durable failed phases at the current
+   * profile created after the profile row last changed all suppress a new
+   * event. Obsolete staged/failed work (older profile hash or older profile
+   * row) and expired grace windows release the page for recovery.
+   */
+  private selectReindexCandidates(
+    db: KyselyDB | KyselyTransaction,
+    cutoffs: { recentDelivery: Date; stagedGrace: Date },
+  ) {
+    return db
+      .selectFrom('ragSourceState as s')
+      .innerJoin('ragWorkspaceProfile as wp', 'wp.workspaceId', 's.workspaceId')
+      .leftJoin('ragGenerations as pub', 'pub.id', 's.publishedGenerationId')
+      .select(['s.workspaceId', 's.pageId'])
+      .where('wp.enabled', '=', true)
+      .where('s.sourceStatus', '=', 'live').where(sql<boolean>`(
+        s.published_input_revision is null
+        or pub.profile_hash is distinct from wp.profile_hash
+        or s.desired_input_revision > s.published_input_revision
+      )`).where(sql<boolean>`not exists (
+        select 1 from rag_outbox o
+        where o.workspace_id = s.workspace_id
+          and o.page_id = s.page_id
+          and (
+            o.status = 'pending'
+            or (
+              o.delivered_at > ${cutoffs.recentDelivery}
+              and (s.published_input_revision is null
+                or s.desired_input_revision > s.published_input_revision)
+            )
+          )
+      )`).where(sql<boolean>`not exists (
+        select 1 from rag_generations g
+        where g.workspace_id = s.workspace_id
+          and g.page_id = s.page_id
+          and g.input_revision = s.desired_input_revision
+          and g.profile_hash = wp.profile_hash
+          and g.created_at >= wp.updated_at
+          and (
+            (g.status = 'staged' and g.created_at > ${cutoffs.stagedGrace})
+            or g.status = 'failed'
+          )
+      )`);
   }
 
   private async recordProfileReindex(
     workspaceId: string,
-    pageIds: string[],
+    pageId: string,
+    cutoffs: { recentDelivery: Date; stagedGrace: Date },
   ): Promise<void> {
     try {
       await this.db.transaction().execute(async (trx) => {
-        for (const pageId of pageIds) {
-          await this.sourceLedger.recordChange(
-            trx,
-            { workspaceId, pageId },
-            'upsert',
-            'profile',
-          );
-        }
+        // Serialize concurrent sweeps per page, then re-check the dedup on a
+        // fresh read so only one recorder wins per profile generation.
+        const locked = await trx
+          .selectFrom('ragSourceState')
+          .select('pageId')
+          .where('workspaceId', '=', workspaceId)
+          .where('pageId', '=', pageId)
+          .where('sourceStatus', '=', 'live')
+          .forUpdate()
+          .executeTakeFirst();
+        if (!locked) return;
+        const eligible = await this.selectReindexCandidates(trx, cutoffs)
+          .where('s.pageId', '=', pageId)
+          .limit(1)
+          .execute();
+        if (eligible.length === 0) return;
+        await this.sourceLedger.recordChange(
+          trx,
+          { workspaceId, pageId },
+          'upsert',
+          'profile',
+        );
       });
     } catch (error) {
-      // A hard-deleted identity rejects the whole batch transaction; the next
-      // sweep re-derives the remaining candidates from persisted state.
+      // A hard-deleted identity rejects the transaction; the next sweep
+      // re-derives the remaining candidates from persisted state.
       this.logger.warn(
-        `rag-relay profile reindex scheduling failed workspaceId=${workspaceId}: ${describeError(error)}`,
+        `rag-relay profile reindex scheduling failed workspaceId=${workspaceId} pageId=${pageId}: ${describeError(error)}`,
       );
     }
   }

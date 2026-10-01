@@ -18,6 +18,11 @@ import { RagStateRepository } from './rag-state.repository';
     RagSourceLedger,
     { provide: RAG_SOURCE_LEDGER, useExisting: RagSourceLedger },
   ],
-  exports: [RagStateRepository, RagOutboxRepository, RAG_SOURCE_LEDGER],
+  exports: [
+    RagStateRepository,
+    RagOutboxRepository,
+    RagSourceLedger,
+    RAG_SOURCE_LEDGER,
+  ],
 })
 export class RagPersistenceModule {}

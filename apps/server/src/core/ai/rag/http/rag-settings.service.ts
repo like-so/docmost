@@ -85,7 +85,10 @@ export class RagSettingsService {
   ): Promise<RagSettingsView> {
     let profile: IndexProfile;
     try {
-      profile = this.profileValidator.validate(input.indexProfileConfig);
+      profile = this.profileValidator.validate(
+        workspace,
+        input.indexProfileConfig,
+      );
     } catch (error) {
       if (error instanceof RagError) {
         // Redacted: the error code only, never credential or source text.
@@ -95,7 +98,9 @@ export class RagSettingsService {
     }
 
     await this.db.transaction().execute(async (trx) => {
-      await this.persistConfig(trx, workspace.id, input.indexProfileConfig);
+      // Persist the validator's normalized profile so the stored config is
+      // byte-identical to the config the profile hash was computed over.
+      await this.persistConfig(trx, workspace.id, profile);
       await this.stateRepository.updateWorkspaceProfile(trx, workspace.id, {
         enabled: input.enabled,
         profileId: profile.profileId,

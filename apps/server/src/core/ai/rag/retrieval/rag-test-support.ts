@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { createHash } from 'node:crypto';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Kysely } from 'kysely';
 import { DbInterface } from '@docmost/db/types/db.interface';
-import { User } from '@docmost/db/types/entity.types';
+import { User, Workspace } from '@docmost/db/types/entity.types';
 import { Cache } from 'cache-manager';
+import {
+  computeProfileHash,
+  computeProfileId,
+} from '../embedding/profile-hash';
 import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
 import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
 import { SpaceRepo } from '@docmost/db/repos/space/space.repo';
@@ -149,7 +152,7 @@ const SUPPORTED_DRIVERS = ['openai-compatible'];
  * deterministic profileHash over the whole config.
  */
 export class FixtureProfileValidator implements RagProfileConfigValidator {
-  validate(config: IndexProfileConfig): IndexProfile {
+  validate(_workspace: Workspace, config: IndexProfileConfig): IndexProfile {
     if (!SUPPORTED_DRIVERS.includes(config.embedding.driver)) {
       throw new RagError('EMBEDDING_NOT_CONFIGURED');
     }
@@ -159,20 +162,14 @@ export class FixtureProfileValidator implements RagProfileConfigValidator {
     ) {
       throw new RagError('SOURCE_UNSUPPORTED');
     }
-    const profileHash = createHash('sha256')
-      .update(JSON.stringify(config))
-      .digest('hex');
+    // The shared hash is canonical (sorted keys), so a profile identity
+    // survives the jsonb round-trip through workspace settings.
+    const profileHash = computeProfileHash(config);
     // The foundation persistence stores profileId in a uuid column; derive a
     // deterministic uuid-shaped id from the profile hash.
     return {
       ...config,
-      profileId: [
-        profileHash.slice(0, 8),
-        profileHash.slice(8, 12),
-        profileHash.slice(12, 16),
-        profileHash.slice(16, 20),
-        profileHash.slice(20, 32),
-      ].join('-'),
+      profileId: computeProfileId(profileHash),
       profileHash,
     };
   }

@@ -37,11 +37,15 @@ import { PageListener } from '@docmost/db/listeners/page.listener';
 import { PostgresJSDialect } from 'kysely-postgres-js';
 import * as postgres from 'postgres';
 import { normalizePostgresUrl } from '../common/helpers';
+import { RagPersistenceModule } from '../core/ai/rag/persistence/persistence.module';
 
 @Global()
 @Module({
   imports: [
     EnvironmentModule,
+    // PageRepo records RAG source changes through RagSourceLedger; the
+    // persistence module must be part of every graph that instantiates repos.
+    RagPersistenceModule,
     KyselyModule.forRootAsync({
       imports: [EnvironmentModule],
       inject: [EnvironmentService],

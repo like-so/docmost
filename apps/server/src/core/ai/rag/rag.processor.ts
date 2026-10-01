@@ -28,8 +28,10 @@ export class RagProcessor extends WorkerHost {
     try {
       return await this.indexer.handle(request);
     } catch (error) {
+      // attemptsMade is zero-based: within N attempts the final attempt
+      // reports N-1, so the durable failed phase must persist there.
       const attempts = job.opts.attempts ?? 1;
-      if (job.attemptsMade >= attempts) {
+      if (job.attemptsMade >= attempts - 1) {
         await this.indexer.recordFailure(
           request,
           error instanceof RagError ? error.code : 'INDEX_WRITE_FAILED',
