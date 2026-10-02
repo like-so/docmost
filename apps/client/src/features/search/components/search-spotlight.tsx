@@ -9,6 +9,7 @@ import {
   Stack,
   NumberInput,
   Slider,
+  TextInput,
   ActionIcon,
   Tooltip,
 } from "@mantine/core";
@@ -60,6 +61,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
     recallCount: number | null;
     vectorThreshold: number | null;
     keywordThreshold: number | null;
+    rerankModelMode: "inherit" | "explicit" | "cleared";
     rerankModelText: string;
     rerankTopK: number | null;
     rerankThreshold: number | null;
@@ -67,6 +69,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
     recallCount: null,
     vectorThreshold: null,
     keywordThreshold: null,
+    rerankModelMode: "inherit",
     rerankModelText: "",
     rerankTopK: null,
     rerankThreshold: null,
@@ -129,6 +132,16 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
     setAiSearchMode(nextMode as RagRetrievalMode);
   };
 
+  // An edited or reset override no longer matches the configuration that
+  // produced any pending or settled answer, so the answer must go.
+  const updateOverrideForm = useCallback(
+    (update: (current: typeof overrideForm) => typeof overrideForm) => {
+      invalidateAiResults();
+      setOverrideForm(update);
+    },
+    [invalidateAiResults],
+  );
+
   const overridePayload = useCallback((): RagRetrievalOverride | undefined => {
     const payload: RagRetrievalOverride = {};
     if (overrideForm.recallCount != null)
@@ -137,8 +150,16 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
       payload.vectorThreshold = overrideForm.vectorThreshold;
     if (overrideForm.keywordThreshold != null)
       payload.keywordThreshold = overrideForm.keywordThreshold;
-    if (overrideForm.rerankModelText.trim())
+    if (overrideForm.rerankModelMode === "cleared") {
+      // Explicit clear: the server drops the workspace selection and then
+      // resolves a model normally. This is not a disable switch.
+      payload.rerankModel = null;
+    } else if (
+      overrideForm.rerankModelMode === "explicit" &&
+      overrideForm.rerankModelText.trim()
+    ) {
       payload.rerankModel = overrideForm.rerankModelText.trim();
+    }
     if (overrideForm.rerankTopK != null)
       payload.rerankTopK = overrideForm.rerankTopK;
     if (overrideForm.rerankThreshold != null)
@@ -184,6 +205,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
   );
 
   const handleAskClick = () => {
+    invalidateAiResults();
     setIsAiMode(!isAiMode);
   };
 
@@ -298,14 +320,15 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
                   size="compact-xs"
                   variant="subtle"
                   onClick={() =>
-                    setOverrideForm({
+                    updateOverrideForm(() => ({
                       recallCount: null,
                       vectorThreshold: null,
                       keywordThreshold: null,
+                      rerankModelMode: "inherit",
                       rerankModelText: "",
                       rerankTopK: null,
                       rerankThreshold: null,
-                    })
+                    }))
                   }
                 >
                   {t("Reset")}
@@ -320,7 +343,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
                 w={220}
                 value={overrideForm.recallCount ?? ""}
                 onChange={(value) =>
-                  setOverrideForm((current) => ({
+                  updateOverrideForm((current) => ({
                     ...current,
                     recallCount: toOptionalInt(value),
                   }))
@@ -334,7 +357,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
                 w={220}
                 value={overrideForm.vectorThreshold ?? 0}
                 onChange={(value) =>
-                  setOverrideForm((current) => ({
+                  updateOverrideForm((current) => ({
                     ...current,
                     vectorThreshold: value,
                   }))
@@ -348,12 +371,53 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
                 w={220}
                 value={overrideForm.keywordThreshold ?? 0}
                 onChange={(value) =>
-                  setOverrideForm((current) => ({
+                  updateOverrideForm((current) => ({
                     ...current,
                     keywordThreshold: value,
                   }))
                 }
               />
+              <div>
+                <Text size="sm">Rerank model</Text>
+                <Text size="xs" c="dimmed">
+                  Inherit keeps the workspace default. Server-resolved clears
+                  the explicit selection and lets the server pick a configured
+                  model.
+                </Text>
+                <SegmentedControl
+                  mt={4}
+                  size="xs"
+                  data={[
+                    { value: "inherit", label: "Inherit" },
+                    { value: "explicit", label: "Custom model" },
+                    { value: "cleared", label: "Server-resolved" },
+                  ]}
+                  value={overrideForm.rerankModelMode}
+                  onChange={(value) =>
+                    updateOverrideForm((current) => ({
+                      ...current,
+                      rerankModelMode:
+                        value === "explicit" || value === "cleared"
+                          ? value
+                          : "inherit",
+                    }))
+                  }
+                />
+              </div>
+              {overrideForm.rerankModelMode === "explicit" && (
+                <TextInput
+                  label="Model reference"
+                  description="Authorized model reference; the server validates it."
+                  w={220}
+                  value={overrideForm.rerankModelText}
+                  onChange={(event) =>
+                    updateOverrideForm((current) => ({
+                      ...current,
+                      rerankModelText: event.currentTarget.value,
+                    }))
+                  }
+                />
+              )}
               <NumberInput
                 label="Rerank top K"
                 min={1}
@@ -362,7 +426,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
                 w={220}
                 value={overrideForm.rerankTopK ?? ""}
                 onChange={(value) =>
-                  setOverrideForm((current) => ({
+                  updateOverrideForm((current) => ({
                     ...current,
                     rerankTopK: toOptionalInt(value),
                   }))
@@ -376,7 +440,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
                 w={220}
                 value={overrideForm.rerankThreshold ?? 0}
                 onChange={(value) =>
-                  setOverrideForm((current) => ({
+                  updateOverrideForm((current) => ({
                     ...current,
                     rerankThreshold: value,
                   }))

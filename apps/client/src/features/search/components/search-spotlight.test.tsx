@@ -270,4 +270,134 @@ describe("AI search control changes", () => {
       screen.getByText("Reranking failed; results keep the retrieval order."),
     ).toBeTruthy();
   });
+
+  it("discards a deferred answer when the AI mode toggles off", async () => {
+    let resolveFirst: (value: { items: { id: string }[] }) => void;
+    api.semanticSearch
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValue({ items: [{ id: "Fresh answer" }] });
+    show();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    fireEvent.change(screen.getByLabelText("Query"), {
+      target: { value: "first" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    await act(async () => resolveFirst!({ items: [{ id: "Stale answer" }] }));
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    expect(screen.queryByText("Stale answer")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(await screen.findByText("Fresh answer")).toBeTruthy();
+  });
+
+  it("discards a deferred answer when an override is edited", async () => {
+    let resolveFirst: (value: { items: { id: string }[] }) => void;
+    api.semanticSearch
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValue({ items: [{ id: "Fresh answer" }] });
+    show();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retrieval overrides" }),
+    );
+    fireEvent.change(await screen.findByLabelText("Recall count"), {
+      target: { value: "5" },
+    });
+    fireEvent.change(screen.getByLabelText("Query"), {
+      target: { value: "first" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    fireEvent.change(screen.getByLabelText("Recall count"), {
+      target: { value: "9" },
+    });
+    await act(async () => resolveFirst!({ items: [{ id: "Stale answer" }] }));
+    expect(screen.queryByText("Stale answer")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(await screen.findByText("Fresh answer")).toBeTruthy();
+    expect(api.semanticSearch).toHaveBeenLastCalledWith("first", undefined, {
+      mode: "hybrid",
+      retrieval: { recallCount: 9 },
+    });
+  });
+
+  it("discards a deferred answer when the overrides are reset", async () => {
+    let resolveFirst: (value: { items: { id: string }[] }) => void;
+    api.semanticSearch
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValue({ items: [{ id: "Fresh answer" }] });
+    show();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retrieval overrides" }),
+    );
+    fireEvent.change(await screen.findByLabelText("Recall count"), {
+      target: { value: "5" },
+    });
+    fireEvent.change(screen.getByLabelText("Query"), {
+      target: { value: "first" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    await act(async () => resolveFirst!({ items: [{ id: "Stale answer" }] }));
+    expect(screen.queryByText("Stale answer")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(await screen.findByText("Fresh answer")).toBeTruthy();
+    expect(api.semanticSearch).toHaveBeenLastCalledWith("first", undefined, {
+      mode: "hybrid",
+      retrieval: undefined,
+    });
+  });
+
+  it("sends rerank-model override inheritance, reference, and explicit clear", async () => {
+    show();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retrieval overrides" }),
+    );
+    fireEvent.click(screen.getByText("Custom model"));
+    fireEvent.change(await screen.findByLabelText("Model reference"), {
+      target: { value: "rerank-model-a" },
+    });
+    fireEvent.change(screen.getByLabelText("Query"), {
+      target: { value: "first" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() =>
+      expect(api.semanticSearch).toHaveBeenLastCalledWith("first", undefined, {
+        mode: "hybrid",
+        retrieval: { rerankModel: "rerank-model-a" },
+      }),
+    );
+    fireEvent.click(screen.getByText("Server-resolved"));
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() =>
+      expect(api.semanticSearch).toHaveBeenLastCalledWith("first", undefined, {
+        mode: "hybrid",
+        retrieval: { rerankModel: null },
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() =>
+      expect(api.semanticSearch).toHaveBeenLastCalledWith("first", undefined, {
+        mode: "hybrid",
+        retrieval: undefined,
+      }),
+    );
+  });
 });

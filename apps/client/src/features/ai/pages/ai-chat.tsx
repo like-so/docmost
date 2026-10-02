@@ -4,10 +4,12 @@ import {
   Button,
   Group,
   NumberInput,
+  SegmentedControl,
   Select,
   Slider,
   Stack,
   Text,
+  TextInput,
   Title,
 } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
@@ -30,6 +32,7 @@ type ChatOverrideForm = {
   recallCount: number | null;
   vectorThreshold: number | null;
   keywordThreshold: number | null;
+  rerankModelMode: "inherit" | "explicit" | "cleared";
   rerankModelText: string;
   rerankTopK: number | null;
   rerankThreshold: number | null;
@@ -39,6 +42,7 @@ const EMPTY_CHAT_OVERRIDES: ChatOverrideForm = {
   recallCount: null,
   vectorThreshold: null,
   keywordThreshold: null,
+  rerankModelMode: "inherit",
   rerankModelText: "",
   rerankTopK: null,
   rerankThreshold: null,
@@ -53,8 +57,16 @@ function chatOverridePayload(
     payload.vectorThreshold = form.vectorThreshold;
   if (form.keywordThreshold != null)
     payload.keywordThreshold = form.keywordThreshold;
-  if (form.rerankModelText.trim())
+  if (form.rerankModelMode === "cleared") {
+    // Explicit clear: the server drops the chat default selection and then
+    // resolves a model normally. This is not a disable switch.
+    payload.rerankModel = null;
+  } else if (
+    form.rerankModelMode === "explicit" &&
+    form.rerankModelText.trim()
+  ) {
     payload.rerankModel = form.rerankModelText.trim();
+  }
   if (form.rerankTopK != null) payload.rerankTopK = form.rerankTopK;
   if (form.rerankThreshold != null)
     payload.rerankThreshold = form.rerankThreshold;
@@ -277,6 +289,46 @@ export default function AiChat() {
               }))
             }
           />
+          <div>
+            <Text size="sm">Rerank model</Text>
+            <Text size="xs" c="dimmed">
+              Inherit keeps the chat default. Server-resolved clears the
+              explicit selection and lets the server pick a configured model.
+            </Text>
+            <SegmentedControl
+              mt={4}
+              size="xs"
+              data={[
+                { value: "inherit", label: "Inherit" },
+                { value: "explicit", label: "Custom model" },
+                { value: "cleared", label: "Server-resolved" },
+              ]}
+              value={overrides.rerankModelMode}
+              onChange={(value) =>
+                setOverrides((current) => ({
+                  ...current,
+                  rerankModelMode:
+                    value === "explicit" || value === "cleared"
+                      ? value
+                      : "inherit",
+                }))
+              }
+            />
+          </div>
+          {overrides.rerankModelMode === "explicit" && (
+            <TextInput
+              label="Model reference"
+              description="Authorized model reference; the server validates it."
+              w={200}
+              value={overrides.rerankModelText}
+              onChange={(event) =>
+                setOverrides((current) => ({
+                  ...current,
+                  rerankModelText: event.currentTarget.value,
+                }))
+              }
+            />
+          )}
           <Slider
             label={(value) => `Rerank threshold: ${value}`}
             min={-10}

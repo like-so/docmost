@@ -188,4 +188,51 @@ describe("assistant retrieval metadata", () => {
       ),
     ).toHaveLength(1);
   });
+
+  it("sends rerank-model override inheritance, reference, and explicit clear", async () => {
+    show();
+    await screen.findByText("Docmost is a wiki.");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retrieval overrides" }),
+    );
+    fireEvent.click(await screen.findByText("Custom model"));
+    fireEvent.change(await screen.findByLabelText("Model reference"), {
+      target: { value: "rerank-model-a" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send test message" }));
+    await waitFor(() =>
+      expect(api.sendChatMessage).toHaveBeenLastCalledWith(
+        "chat-1",
+        "hello",
+        [],
+        expect.any(String),
+        {
+          spaceId: undefined,
+          retrieval: { rerankModel: "rerank-model-a" },
+        },
+      ),
+    );
+    fireEvent.click(await screen.findByText("Server-resolved"));
+    fireEvent.click(screen.getByRole("button", { name: "Send test message" }));
+    await waitFor(() =>
+      expect(api.sendChatMessage).toHaveBeenLastCalledWith(
+        "chat-1",
+        "hello",
+        [],
+        expect.any(String),
+        { spaceId: undefined, retrieval: { rerankModel: null } },
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send test message" }));
+    await waitFor(() =>
+      expect(api.sendChatMessage).toHaveBeenLastCalledWith(
+        "chat-1",
+        "hello",
+        [],
+        expect.any(String),
+        { spaceId: undefined, retrieval: undefined },
+      ),
+    );
+  });
 });
