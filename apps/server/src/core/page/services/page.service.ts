@@ -56,6 +56,7 @@ import { markdownToHtml } from '@docmost/editor-ext';
 import { WatcherService } from '../../watcher/watcher.service';
 import { sql } from 'kysely';
 import { TransclusionService } from '../transclusion/transclusion.service';
+import { RagSourceLedger } from '../../ai/rag/persistence/rag-source-ledger';
 
 @Injectable()
 export class PageService {
@@ -74,6 +75,7 @@ export class PageService {
     private collaborationGateway: CollaborationGateway,
     private readonly watcherService: WatcherService,
     private readonly transclusionService: TransclusionService,
+    private readonly sourceLedger: RagSourceLedger,
   ) {}
 
   async findById(
@@ -130,25 +132,28 @@ export class PageService {
       ydoc = createYdocFromJson(prosemirrorJson);
     }
 
-    const page = await this.pageRepo.insertPage({
-      slugId: generateSlugId(),
-      title: createPageDto.title,
-      position: await this.nextPagePosition(
-        createPageDto.spaceId,
-        parentPageId,
-      ),
-      icon: createPageDto.icon,
-      parentPageId: parentPageId,
-      spaceId: createPageDto.spaceId,
-      creatorId: userId,
-      workspaceId: workspaceId,
-      lastUpdatedById: userId,
-      isBase,
-      baseSchemaVersion: isBase ? 1 : undefined,
-      content,
-      textContent,
-      ydoc,
-    }, trx);
+    const page = await this.pageRepo.insertPage(
+      {
+        slugId: generateSlugId(),
+        title: createPageDto.title,
+        position: await this.nextPagePosition(
+          createPageDto.spaceId,
+          parentPageId,
+        ),
+        icon: createPageDto.icon,
+        parentPageId: parentPageId,
+        spaceId: createPageDto.spaceId,
+        creatorId: userId,
+        workspaceId: workspaceId,
+        lastUpdatedById: userId,
+        isBase,
+        baseSchemaVersion: isBase ? 1 : undefined,
+        content,
+        textContent,
+        ydoc,
+      },
+      trx,
+    );
 
     if (trx) {
       // Add the watcher inside the caller's transaction so the async worker
@@ -854,10 +859,7 @@ export class PageService {
     }
 
     await executeTx(this.db, async (trx) => {
-      await this.pageRepo.lockPageHierarchySpaces(
-        [movedPage.spaceId],
-        trx,
-      );
+      await this.pageRepo.lockPageHierarchySpaces([movedPage.spaceId], trx);
 
       const currentPage = await this.pageRepo.findById(dto.pageId, { trx });
       if (!currentPage || currentPage.deletedAt) {
@@ -883,11 +885,7 @@ export class PageService {
             throw new NotFoundException('Parent page not found');
           }
           if (
-            await this.pageRepo.isPageDescendant(
-              dto.pageId,
-              parentPage.id,
-              trx,
-            )
+            await this.pageRepo.isPageDescendant(dto.pageId, parentPage.id, trx)
           ) {
             throw new BadRequestException(
               'A page cannot be moved under its descendant',
@@ -1099,7 +1097,30 @@ export class PageService {
     }
 
     if (pageIds.length > 0) {
-      await this.db.deleteFrom('pages').where('id', 'in', pageIds).execute();
+      // Hard deletion removes the page rows, but the RAG tombstone and outbox
+      // record must survive so the index drops the deleted sources. Both
+      // commit atomically with the row removal.
+      await executeTx(this.db, async (trx) => {
+        const deletedRows = await trx
+          .selectFrom('pages')
+          .select(['id', 'workspaceId'])
+          .where('id', 'in', pageIds)
+          .execute();
+
+        await trx.deleteFrom('pages').where('id', 'in', pageIds).execute();
+
+        const recorded = new Set<string>();
+        for (const deletedRow of deletedRows) {
+          if (recorded.has(deletedRow.id)) continue;
+          recorded.add(deletedRow.id);
+          await this.sourceLedger.recordChange(
+            trx,
+            { workspaceId: deletedRow.workspaceId, pageId: deletedRow.id },
+            'delete',
+            'page',
+          );
+        }
+      });
       this.eventEmitter.emit(EventName.PAGE_DELETED, {
         pageIds: pageIds,
         workspaceId,
