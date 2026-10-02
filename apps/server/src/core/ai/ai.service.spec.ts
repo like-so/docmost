@@ -33,6 +33,17 @@ function service() {
     { findById: jest.fn() } as any,
     { validateCanView: jest.fn() } as any,
     { logWithContext: jest.fn() } as any,
+    {
+      retrieve: jest.fn().mockResolvedValue({ evidence: [] }),
+    } as any,
+    {
+      retrieveForChat: jest.fn().mockResolvedValue({
+        evidence: [],
+        rewrittenQuery: '',
+        rewriteApplied: false,
+        expansionVariants: [],
+      }),
+    } as any,
   ) as any;
 }
 
@@ -192,19 +203,17 @@ describe('AiService settings and policy', () => {
 
   it('uses only an authorized chat attachment as model context', async () => {
     const instance = service();
-    instance.attachmentRepo.findByIdWithContent = jest
-      .fn()
-      .mockResolvedValue({
-        workspaceId: 'ws',
-        creatorId: 'user',
-        aiChatId: null,
-        type: 'chat',
-        fileExt: '.txt',
-        mimeType: 'text/plain',
-        deletedAt: null,
-        fileName: 'notes.txt',
-        textContent: 'approved content',
-      });
+    instance.attachmentRepo.findByIdWithContent = jest.fn().mockResolvedValue({
+      workspaceId: 'ws',
+      creatorId: 'user',
+      aiChatId: null,
+      type: 'chat',
+      fileExt: '.txt',
+      mimeType: 'text/plain',
+      deletedAt: null,
+      fileName: 'notes.txt',
+      textContent: 'approved content',
+    });
     await expect(
       instance.claimAttachments(['attachment'], 'chat', user),
     ).resolves.toContain('approved content');
@@ -215,19 +224,17 @@ describe('AiService settings and policy', () => {
 
   it('accepts an upload already bound to the same chat', async () => {
     const instance = service();
-    instance.attachmentRepo.findByIdWithContent = jest
-      .fn()
-      .mockResolvedValue({
-        workspaceId: 'ws',
-        creatorId: 'user',
-        aiChatId: 'chat',
-        type: 'chat',
-        fileExt: '.txt',
-        mimeType: 'text/plain',
-        deletedAt: null,
-        fileName: 'notes.txt',
-        textContent: 'uploaded content',
-      });
+    instance.attachmentRepo.findByIdWithContent = jest.fn().mockResolvedValue({
+      workspaceId: 'ws',
+      creatorId: 'user',
+      aiChatId: 'chat',
+      type: 'chat',
+      fileExt: '.txt',
+      mimeType: 'text/plain',
+      deletedAt: null,
+      fileName: 'notes.txt',
+      textContent: 'uploaded content',
+    });
 
     await expect(
       instance.claimAttachments(['attachment'], 'chat', user),
@@ -236,18 +243,16 @@ describe('AiService settings and policy', () => {
 
   it('checks current page access before using a page attachment', async () => {
     const instance = service();
-    instance.attachmentRepo.findByIdWithContent = jest
-      .fn()
-      .mockResolvedValue({
-        workspaceId: 'ws',
-        type: 'file',
-        pageId: 'page',
-        fileName: 'notes.txt',
-        textContent: 'approved content',
-        fileExt: '.txt',
-        mimeType: 'text/plain',
-        deletedAt: null,
-      });
+    instance.attachmentRepo.findByIdWithContent = jest.fn().mockResolvedValue({
+      workspaceId: 'ws',
+      type: 'file',
+      pageId: 'page',
+      fileName: 'notes.txt',
+      textContent: 'approved content',
+      fileExt: '.txt',
+      mimeType: 'text/plain',
+      deletedAt: null,
+    });
     instance.pageRepo.findById.mockResolvedValue({ id: 'page' });
 
     await instance.claimAttachments(['attachment'], 'chat', user);
@@ -273,9 +278,9 @@ describe('AiService settings and policy', () => {
 
     await instance.deleteChat(user, workspace, 'chat');
 
-    expect(instance.attachmentService.handleDeleteAiChatAttachments).toHaveBeenCalledWith(
-      'chat',
-    );
+    expect(
+      instance.attachmentService.handleDeleteAiChatAttachments,
+    ).toHaveBeenCalledWith('chat');
   });
 
   it('uses permission-filtered search only when enabled', async () => {
@@ -294,6 +299,59 @@ describe('AiService settings and policy', () => {
     ).rejects.toThrow(ForbiddenException);
   });
 
+  it('builds search items from hybrid retrieval results with retrieval meta', async () => {
+    const instance = service();
+    const createdAt = new Date('2026-01-01T00:00:00Z');
+    const space = { id: 's1', name: 'Space', slug: 'space' };
+    instance['ragRetriever'].retrieve.mockResolvedValue({
+      evidence: [
+        {
+          key: { pageId: 'p2' },
+          text: 'second',
+          score: { kind: 'rrf', value: 0.9 },
+          locator: null,
+        },
+        {
+          key: { pageId: 'p1' },
+          text: 'first',
+          score: { kind: 'rrf', value: 0.8 },
+          locator: null,
+        },
+      ],
+      retrieval: { mode: 'hybrid', rerankStatus: 'not_configured' },
+    });
+    const page = (id: string, title: string) => ({
+      id,
+      title,
+      icon: null,
+      parentPageId: null,
+      creatorId: 'u',
+      createdAt,
+      updatedAt: createdAt,
+      space,
+    });
+    instance.db.selectFrom.mockReturnValue({
+      select: () => ({
+        where: () => ({
+          where: () => ({
+            execute: jest
+              .fn()
+              .mockResolvedValue([page('p1', 'First'), page('p2', 'Second')]),
+          }),
+        }),
+      }),
+    });
+
+    const result = await instance.semanticSearch(user, workspace, 'roadmap');
+    // Item order is the evidence order, not the lexical order.
+    expect(result.items.map((item) => item.id)).toEqual(['p2', 'p1']);
+    expect(result.retrieval).toEqual({
+      mode: 'hybrid',
+      rerankStatus: 'not_configured',
+    });
+    expect(instance['searchService'].searchPage).not.toHaveBeenCalled();
+  });
+
   it('falls back only when semantic indexing is explicitly unavailable', async () => {
     const instance = service();
     instance.indexService.rank.mockRejectedValue(
@@ -301,7 +359,10 @@ describe('AiService settings and policy', () => {
     );
     await expect(
       instance.semanticSearch(user, workspace, 'roadmap'),
-    ).resolves.toEqual({ items: [] });
+    ).resolves.toEqual({
+      items: [],
+      retrieval: { mode: 'semantic', rerankStatus: 'not_applicable' },
+    });
   });
 
   it('surfaces semantic index corruption instead of silently degrading', async () => {
@@ -372,7 +433,9 @@ describe('AiService settings and policy', () => {
       select: () => ({
         where: () => ({
           where: () => ({
-            orderBy: () => ({ limit: () => ({ execute: jest.fn().mockResolvedValue([]) }) }),
+            orderBy: () => ({
+              limit: () => ({ execute: jest.fn().mockResolvedValue([]) }),
+            }),
           }),
         }),
       }),
@@ -384,11 +447,19 @@ describe('AiService settings and policy', () => {
     });
     const response = {
       statusCode: 200,
-      body: { json: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }) },
+      body: {
+        json: jest
+          .fn()
+          .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+      },
     } as unknown as Awaited<ReturnType<typeof undici.request>>;
     jest.spyOn(undici, 'request').mockResolvedValue(response);
     instance.db.insertInto.mockReturnValue({
-      values: () => ({ returning: () => ({ executeTakeFirstOrThrow: jest.fn().mockResolvedValue({}) }) }),
+      values: () => ({
+        returning: () => ({
+          executeTakeFirstOrThrow: jest.fn().mockResolvedValue({}),
+        }),
+      }),
     });
 
     await instance.complete(workspace, 'chat', 'request');

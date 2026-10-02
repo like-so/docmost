@@ -17,7 +17,12 @@ import { EncryptionService } from '../../integrations/encryption/encryption.serv
 import { OutboundAgentFactory } from '../../integrations/outbound/outbound-agent.factory';
 import { EnvironmentService } from '../../integrations/environment/environment.service';
 import { SearchService } from '../search/search.service';
-import { UpdateAiProviderDto } from './dto/ai.dto';
+import { SearchResponseDto } from '../search/dto/search-response.dto';
+import {
+  ChatRetrievalOptionsDto,
+  RagRetrievalOverridesDto,
+  UpdateAiProviderDto,
+} from './dto/ai.dto';
 import { AiIndexService } from './ai-index.service';
 import { AttachmentService } from '../attachment/services/attachment.service';
 import { AttachmentType } from '../attachment/attachment.constants';
@@ -28,6 +33,10 @@ import {
   AUDIT_SERVICE,
   IAuditService,
 } from '../../integrations/audit/audit.service';
+import { RagRetrieverService } from './rag/retrieval/rag-retriever.service';
+import { RagChatRetrievalService } from './rag/retrieval/rag-chat-retrieval.service';
+import { RagError, RagEvidence, RagRetrievalMeta } from './rag/contracts';
+import { JsonValue } from '@docmost/db/types/db';
 
 type AiProvider = {
   driver: string;
@@ -36,6 +45,41 @@ type AiProvider = {
   embeddingModel?: string;
   apiKey?: string;
 };
+
+/**
+ * Shared provider endpoint helpers. `model` overrides the provider's default
+ * chat model in driver-specific URL positions (gemini), so auxiliary model
+ * calls (e.g. the RAG chat rewrite) can target a configured alternate model.
+ */
+export function chatUrlFor(
+  provider: { driver: string; baseUrl: string; chatModel: string },
+  model?: string,
+) {
+  const chatModel = model ?? provider.chatModel;
+  if (provider.driver === 'ollama')
+    return new URL('/api/chat', provider.baseUrl).toString();
+  if (provider.driver === 'gemini')
+    return new URL(
+      `/v1beta/models/${encodeURIComponent(chatModel)}:generateContent`,
+      provider.baseUrl,
+    ).toString();
+  return new URL('/v1/chat/completions', provider.baseUrl).toString();
+}
+
+export function providerHeadersFor(provider: {
+  driver: string;
+  apiKey?: string;
+}) {
+  return provider.driver === 'gemini'
+    ? {
+        'content-type': 'application/json',
+        'x-goog-api-key': provider.apiKey ?? '',
+      }
+    : {
+        authorization: `Bearer ${provider.apiKey}`,
+        'content-type': 'application/json',
+      };
+}
 
 @Injectable()
 export class AiService {
@@ -53,6 +97,8 @@ export class AiService {
     private readonly pageRepo: PageRepo,
     private readonly pageAccessService: PageAccessService,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
+    private readonly ragRetriever: RagRetrieverService,
+    private readonly ragChatRetrieval: RagChatRetrievalService,
   ) {}
 
   async getProvider(workspace: Workspace) {
@@ -125,7 +171,7 @@ export class AiService {
 
   async getChat(user: User, chatId: string) {
     const chat = await this.findChat(user, chatId);
-    const messages = await this.db
+    const rows = await this.db
       .selectFrom('aiChatMessages')
       .select(['id', 'role', 'content', 'metadata', 'createdAt'])
       .where('chatId', '=', chat.id)
@@ -134,7 +180,12 @@ export class AiService {
       .orderBy('createdAt', 'asc')
       .limit(200)
       .execute();
-    return { ...chat, messages };
+    return {
+      ...chat,
+      messages: rows.map((row) =>
+        row.role === 'assistant' ? this.assistantMessageView(row) : row,
+      ),
+    };
   }
 
   async deleteChat(user: User, workspace: Workspace, chatId: string) {
@@ -164,6 +215,7 @@ export class AiService {
     content: string,
     attachmentIds: string[] = [],
     requestId?: string,
+    retrieval?: ChatRetrievalOptionsDto,
   ) {
     this.requireChatWrite(workspace);
     this.requireGenerative(workspace);
@@ -190,16 +242,18 @@ export class AiService {
     const assistant = await this.complete(
       workspace,
       chat.id,
+      user.id,
       requestId,
       this.workspaceKnowledgeOnly(workspace),
       attachmentContext,
+      retrieval,
     );
     await this.db
       .updateTable('aiChats')
       .set({ updatedAt: new Date() })
       .where('id', '=', chat.id)
       .execute();
-    return { message, assistant };
+    return { message, assistant: this.assistantMessageView(assistant) };
   }
 
   async cancel(user: User, chatId: string, requestId: string) {
@@ -215,36 +269,132 @@ export class AiService {
     query: string,
     spaceId?: string,
     titleOnly?: boolean,
-  ) {
+    mode?: 'semantic' | 'keyword' | 'hybrid',
+    overrides?: RagRetrievalOverridesDto,
+  ): Promise<{ items: SearchResponseDto[]; retrieval: RagRetrievalMeta }> {
     this.requireSearch(workspace);
+    // Hybrid RAG is the default item source (docmost-rag-v1 contract 12):
+    // items are built from the actual retrieval results (all modes), not
+    // from the lexical page search. The legacy semantic index serves only
+    // title-only queries and when RAG is unavailable or returns nothing.
+    if (!titleOnly) {
+      try {
+        const result = await this.ragRetriever.retrieve(
+          { userId: user.id, workspaceId: workspace.id },
+          {
+            query,
+            mode: mode ?? 'hybrid',
+            limit: 25,
+            ...(spaceId ? { spaceId } : {}),
+            ...(overrides ? { overrides } : {}),
+          },
+        );
+        const items = await this.hydrateEvidencePages(
+          result.evidence,
+          workspace.id,
+        );
+        if (items.length > 0) {
+          return { items, retrieval: result.retrieval };
+        }
+      } catch (error) {
+        // RagError or an unreachable index means the RAG side is
+        // unavailable for this workspace; the legacy index still serves.
+        // Anything else is a real failure.
+        if (!(error instanceof RagError) && !this.isIndexUnavailable(error))
+          throw error;
+      }
+    }
     const response = await this.searchService.searchPage(
       { query, spaceId, titleOnly, limit: 25, offset: 0 },
       { userId: user.id, workspaceId: workspace.id },
     );
-    try {
-      const order = await this.indexService.rank(
-        query,
-        response.items.map((item) => item.id),
-        workspace.id,
-      );
-      const rank = new Map(order.map((id, index) => [id, index]));
-      response.items.sort(
-        (left, right) =>
-          (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
-          (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER),
-      );
-    } catch (error) {
-      if (!this.isIndexUnavailable(error)) throw error;
+    if (!titleOnly) {
+      try {
+        const order = await this.indexService.rank(
+          query,
+          response.items.map((item) => item.id),
+          workspace.id,
+        );
+        const rank = new Map(order.map((id, index) => [id, index]));
+        response.items.sort(
+          (left, right) =>
+            (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+            (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER),
+        );
+      } catch (error) {
+        if (!this.isIndexUnavailable(error)) throw error;
+      }
     }
-    return response;
+    // The executed legacy stage is semantic ranking; rerank never applies.
+    return {
+      ...response,
+      retrieval: { mode: 'semantic', rerankStatus: 'not_applicable' },
+    };
+  }
+
+  /**
+   * Projects retrieval evidence into page search items, preserving evidence
+   * order. Every evidence pageId was authorized inside the retriever; this
+   * hydrates the current page/space fields and drops pages deleted since.
+   */
+  private async hydrateEvidencePages(
+    evidence: RagEvidence[],
+    _workspaceId: string,
+  ): Promise<SearchResponseDto[]> {
+    const pageIds: string[] = [];
+    for (const item of evidence) {
+      if (!pageIds.includes(item.key.pageId)) {
+        pageIds.push(item.key.pageId);
+      }
+    }
+    if (pageIds.length === 0) return [];
+    const rows = await this.db
+      .selectFrom('pages')
+      .select((eb) => [
+        'pages.id',
+        'pages.slugId',
+        'pages.title',
+        'pages.icon',
+        'pages.parentPageId',
+        'pages.creatorId',
+        'pages.createdAt',
+        'pages.updatedAt',
+        this.pageRepo.withSpace(eb),
+      ])
+      .where('pages.id', 'in', pageIds)
+      .where('pages.deletedAt', 'is', null)
+      .execute();
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const items: SearchResponseDto[] = [];
+    for (const pageId of pageIds) {
+      const page = byId.get(pageId);
+      if (!page) continue;
+      items.push({
+        id: page.id,
+        title: page.title,
+        icon: page.icon,
+        parentPageId: page.parentPageId,
+        creatorId: page.creatorId,
+        rank: 0,
+        highlight: '',
+        matchedText: [],
+        wholeWord: false,
+        createdAt: page.createdAt,
+        updatedAt: page.updatedAt,
+        space: page.space,
+      });
+    }
+    return items;
   }
 
   private async complete(
     workspace: Workspace,
     chatId: string,
+    userId: string,
     requestId?: string,
     workspaceOnly = false,
     attachmentContext?: string,
+    retrieval?: ChatRetrievalOptionsDto,
   ) {
     const provider = this.readProvider(workspace);
     if (!provider?.apiKey)
@@ -257,6 +407,14 @@ export class AiService {
       .orderBy('createdAt', 'asc')
       .limit(40)
       .execute();
+    const rag = await this.retrieveRagContext(
+      workspace,
+      userId,
+      messages,
+      Boolean(attachmentContext),
+      retrieval,
+    );
+    const ragContext = rag?.context ?? null;
     const url = this.chatUrl(provider);
     const key = requestId
       ? this.requestKey(workspace.id, chatId, requestId)
@@ -277,6 +435,7 @@ export class AiService {
               messages,
               workspaceOnly,
               attachmentContext,
+              ragContext,
             ),
           ),
         });
@@ -300,6 +459,12 @@ export class AiService {
           throw new BadGatewayException(
             'AI provider returned an empty response',
           );
+        const assistantMetadata: JsonValue = rag
+          ? ({
+              retrieval: rag.retrieval,
+              sources: await this.hydrateCitationSources(rag.evidence),
+            } as unknown as JsonValue)
+          : null;
         return this.db
           .insertInto('aiChatMessages')
           .values({
@@ -308,8 +473,9 @@ export class AiService {
             userId: null,
             role: 'assistant',
             content,
+            metadata: assistantMetadata,
           })
-          .returning(['id', 'role', 'content', 'createdAt'])
+          .returning(['id', 'role', 'content', 'metadata', 'createdAt'])
           .executeTakeFirstOrThrow();
       } finally {
         await lease.release();
@@ -409,14 +575,7 @@ export class AiService {
   }
 
   private chatUrl(provider: AiProvider) {
-    if (provider.driver === 'ollama')
-      return new URL('/api/chat', provider.baseUrl).toString();
-    if (provider.driver === 'gemini')
-      return new URL(
-        `/v1beta/models/${encodeURIComponent(provider.chatModel)}:generateContent`,
-        provider.baseUrl,
-      ).toString();
-    return new URL('/v1/chat/completions', provider.baseUrl).toString();
+    return chatUrlFor(provider);
   }
 
   private chatRequest(
@@ -424,14 +583,20 @@ export class AiService {
     messages: Array<{ role: string; content: string | null }>,
     workspaceOnly: boolean,
     attachmentContext?: string,
+    ragContext?: string,
   ) {
     const policy = workspaceOnly
       ? 'Answer only from the supplied workspace context. Do not use external knowledge.'
       : undefined;
-    const context = attachmentContext
-      ? `Authorized attachment context:\n${attachmentContext}`
-      : undefined;
-    const instructions = [policy, context].filter(Boolean).join('\n\n');
+    const instructions = [
+      policy,
+      attachmentContext
+        ? `Authorized attachment context:\n${attachmentContext}`
+        : undefined,
+      ragContext ? `Authorized workspace context:\n${ragContext}` : undefined,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
     if (provider.driver === 'ollama')
       return {
         model: provider.chatModel,
@@ -467,6 +632,139 @@ export class AiService {
       baseUrl: provider.baseUrl,
       chatModel: provider.chatModel,
       embeddingModel: provider.embeddingModel,
+    };
+  }
+
+  /**
+   * Hybrid RAG retrieval for chat (docmost-rag-v1 contract 12): rewrite,
+   * retrieval, expansion and rerank happen inside RagChatRetrievalService;
+   * every returned chunk was rechecked for authorization at the retrieval
+   * boundary. Any failure yields null so chat works unchanged without RAG.
+   */
+  private async retrieveRagContext(
+    workspace: Workspace,
+    userId: string,
+    messages: Array<{ role: string; content: string | null }>,
+    hasAttachments: boolean,
+    retrieval?: ChatRetrievalOptionsDto,
+  ): Promise<{
+    context: string;
+    evidence: RagEvidence[];
+    retrieval: RagRetrievalMeta;
+  } | null> {
+    const lastUser = [...messages]
+      .reverse()
+      .find((message) => message.role === 'user' && message.content?.trim());
+    if (!lastUser?.content) return null;
+    try {
+      const output = await this.ragChatRetrieval.retrieveForChat(
+        { userId, workspaceId: workspace.id },
+        {
+          query: lastUser.content.trim(),
+          history: messages
+            .slice(0, messages.indexOf(lastUser))
+            .map((message) => ({
+              role: message.role as 'user' | 'assistant',
+              content: message.content,
+            })),
+          attachmentFileNames: hasAttachments ? ['(attached documents)'] : [],
+          ...(retrieval?.mode ? { mode: retrieval.mode } : {}),
+          ...(retrieval?.spaceId ? { spaceId: retrieval.spaceId } : {}),
+          ...(retrieval?.pageIds?.length ? { pageIds: retrieval.pageIds } : {}),
+          ...(retrieval?.overrides ? { overrides: retrieval.overrides } : {}),
+        },
+      );
+      if (output.evidence.length === 0) return null;
+      const context = output.evidence
+        .map((evidence, index) => {
+          const heading = evidence.locator?.headingPath?.length
+            ? `, ${evidence.locator.headingPath.join(' > ')}`
+            : '';
+          return `[${index + 1}] (page ${evidence.key.pageId}${heading})\n${evidence.text}`;
+        })
+        .join('\n\n');
+      return {
+        context,
+        evidence: output.evidence,
+        retrieval: output.retrieval,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Persisted citation sources for the assistant message: one entry per
+   * evidence chunk, hydrated with the page title and canonical page URL.
+   * Evidence pageIds are authorized at the retrieval boundary; pages
+   * deleted since are skipped.
+   */
+  private async hydrateCitationSources(evidence: RagEvidence[]): Promise<
+    Array<{
+      citationId: string;
+      pageId: string;
+      title: string | null;
+      url: string;
+      locator: RagEvidence['locator'];
+    }>
+  > {
+    const pageIds = [...new Set(evidence.map((item) => item.key.pageId))];
+    if (pageIds.length === 0) return [];
+    const rows = await this.db
+      .selectFrom('pages')
+      .select((eb) => [
+        'pages.id',
+        'pages.slugId',
+        'pages.title',
+        this.pageRepo.withSpace(eb),
+      ])
+      .where('pages.id', 'in', pageIds)
+      .where('pages.deletedAt', 'is', null)
+      .execute();
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    return evidence.flatMap((item, index) => {
+      const page = byId.get(item.key.pageId);
+      if (!page) return [];
+      return [
+        {
+          citationId: String(index + 1),
+          pageId: page.id,
+          title: page.title,
+          url: `/s/${page.space.slug}/p/${page.slugId}`,
+          locator: item.locator,
+        },
+      ];
+    });
+  }
+
+  /**
+   * The assistant message view: the retrieval metadata and citation sources
+   * stored in the message metadata are projected to top-level fields.
+   */
+  private assistantMessageView(row: {
+    id: string;
+    role: string;
+    content: string | null;
+    metadata: unknown;
+    createdAt: Date;
+  }) {
+    const meta = (row.metadata ?? null) as {
+      retrieval?: RagRetrievalMeta;
+      sources?: Array<{
+        citationId: string;
+        pageId: string;
+        title: string | null;
+        url: string;
+        locator: unknown;
+      }>;
+    } | null;
+    return {
+      id: row.id,
+      role: row.role,
+      content: row.content,
+      createdAt: row.createdAt,
+      ...(meta?.retrieval ? { retrieval: meta.retrieval } : {}),
+      ...(meta?.sources ? { sources: meta.sources } : {}),
     };
   }
 
@@ -528,15 +826,7 @@ export class AiService {
   }
 
   private providerHeaders(provider: AiProvider) {
-    return provider.driver === 'gemini'
-      ? {
-          'content-type': 'application/json',
-          'x-goog-api-key': provider.apiKey ?? '',
-        }
-      : {
-          authorization: `Bearer ${provider.apiKey}`,
-          'content-type': 'application/json',
-        };
+    return providerHeadersFor(provider);
   }
 
   private requestSignal(controller?: AbortController) {

@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   ForbiddenException,
+  Get,
   HttpCode,
   HttpStatus,
   Post,
@@ -15,6 +16,7 @@ import { UserRole } from '../../../../common/helpers/types/permission';
 import {
   RagPageDto,
   RagRetrieveDto,
+  RagRetrievalSettingsUpdateDto,
   RagSettingsUpdateDto,
 } from './rag-http.dto';
 import { RagSettingsService } from './rag-settings.service';
@@ -23,8 +25,8 @@ import { RagReindexService } from './rag-reindex.service';
 import { RagRetrieverService } from '../retrieval/rag-retriever.service';
 
 /**
- * The five POST adapters of docmost-rag-v1 contract 13. Owner-only for the
- * two settings routes; status requires view and reindex requires edit
+ * HTTP adapters of docmost-rag-v1 contract 13. Owner-only for the two
+ * settings routes; status requires view and reindex requires edit
  * permission (checked in their services); retrieve requires only workspace
  * authentication and rechecks authorization inside the retriever.
  */
@@ -64,6 +66,29 @@ export class RagHttpController {
           tokenizerId: input.indexProfileConfig.embedding.tokenizerId ?? null,
         },
       },
+    });
+  }
+
+  @Get('retrieval-settings')
+  getRetrievalSettings(
+    @AuthUser() user: User,
+    @AuthWorkspace() workspace: Workspace,
+  ) {
+    this.requireOwner(user);
+    return this.settingsService.getRetrievalSettings(workspace);
+  }
+
+  @Post('retrieval-settings/update')
+  @HttpCode(HttpStatus.OK)
+  updateRetrievalSettings(
+    @Body() input: RagRetrievalSettingsUpdateDto,
+    @AuthUser() user: User,
+    @AuthWorkspace() workspace: Workspace,
+  ) {
+    this.requireOwner(user);
+    return this.settingsService.updateRetrievalSettings(workspace, {
+      search: input.search as Record<string, unknown> | undefined,
+      chat: input.chat as Record<string, unknown> | undefined,
     });
   }
 

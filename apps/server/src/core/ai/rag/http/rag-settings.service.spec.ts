@@ -225,4 +225,45 @@ jest.setTimeout(30000);
       ).toBe(view.indexProfile?.profileHash);
     });
   });
+
+  it('exposes retrieval settings as the {search, chat} envelope', async () => {
+    await setup(async ({ db, workspaceId, service }) => {
+      const initial = await service.getRetrievalSettings({
+        id: workspaceId,
+      } as never);
+      expect(Object.keys(initial).sort()).toEqual(['chat', 'search']);
+      expect(initial.search.recallCount).toBe(50);
+      expect(initial.chat.rewriteEnabled).toBe(true);
+
+      const updated = await service.updateRetrievalSettings(
+        { id: workspaceId } as never,
+        { search: { recallCount: 80 } },
+      );
+      expect(Object.keys(updated).sort()).toEqual(['chat', 'search']);
+      expect(updated.search.recallCount).toBe(80);
+      // The update returns the same full view as a fresh read.
+      const reloaded = await db
+        .selectFrom('workspaces')
+        .selectAll()
+        .where('id', '=', workspaceId)
+        .executeTakeFirst();
+      expect(await service.getRetrievalSettings(reloaded as never)).toEqual(
+        updated,
+      );
+      expect(updated.chat).toEqual(initial.chat);
+
+      const row = await db
+        .selectFrom('workspaces')
+        .select('settings')
+        .where('id', '=', workspaceId)
+        .executeTakeFirst();
+      const rag = (row?.settings as Record<string, never>)['rag'] as Record<
+        string,
+        never
+      >;
+      // Internal persisted naming stays decoupled from the public envelope.
+      expect(rag['retrievalSettings']).toBeDefined();
+      expect(rag['chatRetrievalSettings']).toBeDefined();
+    });
+  });
 });

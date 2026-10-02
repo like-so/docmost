@@ -91,6 +91,7 @@ export class AiController {
       input.content,
       input.attachmentIds,
       input.requestId,
+      input.retrieval,
     );
   }
 
@@ -113,6 +114,8 @@ export class AiController {
       input.query,
       input.spaceId,
       input.titleOnly,
+      input.mode,
+      input.overrides,
     );
   }
 

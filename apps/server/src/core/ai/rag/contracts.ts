@@ -100,6 +100,16 @@ export interface EmbeddingProfileConfig {
   maxInputTokens: number;
 }
 
+/**
+ * Owner-controlled indexing channels. Legacy profiles stored before this
+ * field existed keep their exact profile hash: the hash covers the field only
+ * when it is explicitly present, and consumers default it to both enabled.
+ */
+export interface IndexingStrategy {
+  vectorEnabled: boolean;
+  keywordEnabled: boolean;
+}
+
 export interface IndexProfileConfig {
   parserVersion: string;
   chunkerVersion: string;
@@ -107,6 +117,7 @@ export interface IndexProfileConfig {
   overlapTokens: number;
   sourcePolicy: SourcePolicy;
   embedding: EmbeddingProfileConfig;
+  indexingStrategy?: IndexingStrategy;
 }
 
 export interface IndexProfile extends IndexProfileConfig {
@@ -234,7 +245,7 @@ export interface RagIndexerResult {
   generationId?: string;
 }
 
-export type RagRetrievalMode = 'semantic' | 'keyword';
+export type RagRetrievalMode = 'semantic' | 'keyword' | 'hybrid';
 
 export interface RagActor {
   userId: string;
@@ -247,6 +258,42 @@ export interface RagRetrieverQuery {
   pageIds?: string[];
   mode: RagRetrievalMode;
   limit: number;
+  /**
+   * Per-request retrieval knobs merged over the stored settings before
+   * parsing. rerankModel is intentionally excluded: the model is resolved
+   * server-side only.
+   */
+  overrides?: Omit<RagRetrievalOverride, 'rerankModel'>;
+}
+
+/**
+ * Per-request overrides of the retrieval knobs. Absent fields keep the
+ * stored (or default) values; the merged payload passes through the same
+ * normalization as the stored settings.
+ */
+export interface RagRetrievalOverride {
+  recallCount?: number;
+  vectorThreshold?: number;
+  keywordThreshold?: number;
+  rerankModel?: string | null;
+  rerankTopK?: number;
+  rerankThreshold?: number;
+}
+
+/**
+ * Actual-stage retrieval metadata: the mode that executed and whether the
+ * rerank stage was applied, unavailable (no model configured), failed, or
+ * not applicable (no evidence / non-hybrid mode).
+ */
+export type RagRerankStatus =
+  | 'applied'
+  | 'not_configured'
+  | 'failed'
+  | 'not_applicable';
+
+export interface RagRetrievalMeta {
+  mode: RagRetrievalMode;
+  rerankStatus: RagRerankStatus;
 }
 
 export interface RagEvidence {
@@ -255,11 +302,12 @@ export interface RagEvidence {
   inputRevision: InputRevision;
   text: string;
   locator: ChunkLocator;
-  score: { kind: 'cosine' | 'lexical'; value: number };
+  score: { kind: 'cosine' | 'keyword' | 'rrf' | 'rerank'; value: number };
 }
 
 export interface RagRetrieveResult {
   evidence: RagEvidence[];
+  retrieval: RagRetrievalMeta;
 }
 
 export interface SourceLedger {
@@ -347,6 +395,57 @@ export interface RagRetriever {
   ): Promise<RagRetrieveResult>;
 }
 
+/**
+ * Workspace search defaults (owner-controlled, stored outside the index
+ * profile so changing them never rebuilds embeddings). Defaults follow the
+ * pinned reference (WeKnora bccb4b1) effective values: recallCount 50,
+ * vectorThreshold 0.15, keywordThreshold 0.3, rerankTopK 10,
+ * rerankThreshold 0.2.
+ */
+export interface RagRetrievalSettings {
+  recallCount: number;
+  vectorThreshold: number;
+  keywordThreshold: number;
+  rerankModel: string | null;
+  rerankTopK: number;
+  rerankThreshold: number;
+}
+
+/**
+ * Chat query-understanding defaults (owner-controlled, stored outside the
+ * index profile). Defaults follow the pinned reference conversation config:
+ * rewrite and expansion enabled, the default_rewrite template, temperature
+ * 0.3 and a 150-token completion budget. queryUnderstandingModel null falls
+ * back to the workspace provider chat model.
+ */
+export interface RagChatRetrievalSettings {
+  rewriteEnabled: boolean;
+  expansionEnabled: boolean;
+  queryUnderstandingModel: string | null;
+  rewriteSystemPrompt: string;
+  rewriteUserPrompt: string;
+}
+
+export interface RagRetrievalSettingsView {
+  search: RagRetrievalSettings;
+  chat: RagChatRetrievalSettings;
+}
+
+/**
+ * Rerank port. Implementations send no unauthorized text: callers pass only
+ * actor-authorized evidence. A null result means the model is missing or
+ * unavailable; callers preserve retrieval order in that case. The score
+ * values are model relevance scores in [0, 1] aligned with the passages.
+ */
+export interface RagRerankPort {
+  rerank(
+    workspaceId: string,
+    model: string,
+    query: string,
+    passages: string[],
+  ): Promise<number[] | null>;
+}
+
 export const RAG_SOURCE_LEDGER = Symbol('RAG_SOURCE_LEDGER');
 export const RAG_SOURCE_READER = Symbol('RAG_SOURCE_READER');
 export const RAG_DOCUMENT_PARSER = Symbol('RAG_DOCUMENT_PARSER');
@@ -356,6 +455,7 @@ export const RAG_EMBEDDING_PORT = Symbol('RAG_EMBEDDING_PORT');
 export const RAG_GENERATION_STORE = Symbol('RAG_GENERATION_STORE');
 export const RAG_INDEXER = Symbol('RAG_INDEXER');
 export const RAG_RETRIEVER = Symbol('RAG_RETRIEVER');
+export const RAG_RERANK_PORT = Symbol('RAG_RERANK_PORT');
 
 /**
  * HTTP adapter payload types (owned by the HTTP component). POST-style

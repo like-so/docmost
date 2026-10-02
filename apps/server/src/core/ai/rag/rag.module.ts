@@ -31,10 +31,14 @@ import {
   RAG_GENERATION_STORE,
   RAG_INDEXER,
   RAG_PROFILE_RESOLVER,
+  RAG_RERANK_PORT,
 } from './contracts';
 import { RagIndexerService } from './rag-indexer.service';
 import { RagProcessor } from './rag.processor';
 import { RagOutboxRelayService } from './rag-outbox-relay.service';
+import { RagRetrieverService } from './retrieval/rag-retriever.service';
+import { RagChatRetrievalService } from './retrieval/rag-chat-retrieval.service';
+import { OpenAiCompatibleRerankAdapter } from './retrieval/openai-compatible.rerank.adapter';
 
 /**
  * Wiring-level profile adapter (docmost-rag-v1 contract 13). The HTTP
@@ -275,6 +279,10 @@ export class RagComposedProfileResolver implements RagProfileResolver {
     { provide: RAG_INDEXER, useExisting: RagIndexerService },
     RagProcessor,
     RagOutboxRelayService,
+    OpenAiCompatibleRerankAdapter,
+    { provide: RAG_RERANK_PORT, useExisting: OpenAiCompatibleRerankAdapter },
+    RagRetrieverService,
+    RagChatRetrievalService,
   ],
   exports: [
     RagIndexerService,
@@ -282,6 +290,9 @@ export class RagComposedProfileResolver implements RagProfileResolver {
     RAG_PROFILE_CONFIG_VALIDATOR,
     RAG_PROFILE_RESOLVER,
     RAG_EMBEDDING_PORT,
+    RAG_RERANK_PORT,
+    RagRetrieverService,
+    RagChatRetrievalService,
   ],
 })
 export class RagModule {}

@@ -6,6 +6,7 @@ import {
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
   IsUUID,
@@ -41,7 +42,7 @@ export class RagRetrieveDto {
   @ArrayMaxSize(RETRIEVE_PAGE_IDS_MAX)
   pageIds?: string[];
 
-  @IsIn(['semantic', 'keyword'])
+  @IsIn(['semantic', 'keyword', 'hybrid'])
   mode: RagRetrievalMode;
 
   @IsInt()
@@ -93,6 +94,14 @@ export class RagEmbeddingConfigDto {
   maxInputTokens: number;
 }
 
+export class RagIndexingStrategyDto {
+  @IsBoolean()
+  vectorEnabled: boolean;
+
+  @IsBoolean()
+  keywordEnabled: boolean;
+}
+
 export class RagIndexProfileConfigDto {
   @IsString()
   @MaxLength(60)
@@ -117,6 +126,12 @@ export class RagIndexProfileConfigDto {
   @ValidateNested()
   @Type(() => RagEmbeddingConfigDto)
   embedding: RagEmbeddingConfigDto;
+
+  // Optional: legacy profiles omit it and keep their exact profile hash.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RagIndexingStrategyDto)
+  indexingStrategy?: RagIndexingStrategyDto;
 }
 
 export class RagSettingsUpdateDto {
@@ -126,4 +141,81 @@ export class RagSettingsUpdateDto {
   @ValidateNested()
   @Type(() => RagIndexProfileConfigDto)
   indexProfileConfig: RagIndexProfileConfigDto;
+}
+
+/**
+ * Owner-controlled retrieval settings (docmost-rag-v1 contract 13). Defaults
+ * follow the pinned reference; every field is optional in the update payload
+ * and invalid or missing fields fall back to defaults server-side.
+ */
+export class RagRetrievalSettingsDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  recallCount?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  vectorThreshold?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  keywordThreshold?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  rerankModel?: string | null;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  rerankTopK?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(-10)
+  @Max(10)
+  rerankThreshold?: number;
+}
+
+export class RagChatRetrievalSettingsDto {
+  @IsOptional()
+  @IsBoolean()
+  rewriteEnabled?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  expansionEnabled?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  queryUnderstandingModel?: string | null;
+
+  @IsOptional()
+  @IsString()
+  rewriteSystemPrompt?: string;
+
+  @IsOptional()
+  @IsString()
+  rewriteUserPrompt?: string;
+}
+
+export class RagRetrievalSettingsUpdateDto {
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RagRetrievalSettingsDto)
+  search?: RagRetrievalSettingsDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RagChatRetrievalSettingsDto)
+  chat?: RagChatRetrievalSettingsDto;
 }
