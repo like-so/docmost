@@ -1,11 +1,16 @@
 import { Spotlight } from "@mantine/spotlight";
-import { IconSearch, IconSparkles } from "@tabler/icons-react";
+import { IconAdjustments, IconSearch, IconSparkles } from "@tabler/icons-react";
 import {
   Group,
   Button,
   VisuallyHidden,
   Text,
   SegmentedControl,
+  Stack,
+  NumberInput,
+  Slider,
+  ActionIcon,
+  Tooltip,
 } from "@mantine/core";
 import React, {
   useState,
@@ -26,7 +31,9 @@ import { workspaceAtom } from "@/features/user/atoms/current-user-atom.ts";
 import {
   semanticSearch,
   type RagRetrievalMode,
+  type RagRetrievalOverride,
 } from "@/features/ai/services/ai-service";
+import { RetrievalStatusNotice } from "@/features/ai/components/retrieval-status-notice";
 
 interface SearchSpotlightProps {
   spaceId?: string;
@@ -48,6 +55,22 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
   });
   const [isAiMode, setIsAiMode] = useState(false);
   const [aiSearchMode, setAiSearchMode] = useState<RagRetrievalMode>("hybrid");
+  const [overridesOpen, setOverridesOpen] = useState(false);
+  const [overrideForm, setOverrideForm] = useState<{
+    recallCount: number | null;
+    vectorThreshold: number | null;
+    keywordThreshold: number | null;
+    rerankModelText: string;
+    rerankTopK: number | null;
+    rerankThreshold: number | null;
+  }>({
+    recallCount: null,
+    vectorThreshold: null,
+    keywordThreshold: null,
+    rerankModelText: "",
+    rerankTopK: null,
+    rerankThreshold: null,
+  });
 
   // Build unified search params
   const searchParams = useMemo(() => {
@@ -85,14 +108,43 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
   const [aiSearchError, setAiSearchError] = useState<Error>();
   const aiRequestId = useRef(0);
 
-  const handleQueryChange = (nextQuery: string) => {
-    if (nextQuery === query) return;
+  // Any change to query, mode, or filters must discard in-flight and settled
+  // AI results so stale answers never render under new controls.
+  const invalidateAiResults = useCallback(() => {
     aiRequestId.current += 1;
-    setQuery(nextQuery);
     setAiSearchResult(undefined);
     setAiSearchError(undefined);
     setAiLoading(false);
+  }, []);
+
+  const handleQueryChange = (nextQuery: string) => {
+    if (nextQuery === query) return;
+    invalidateAiResults();
+    setQuery(nextQuery);
   };
+
+  const handleAiModeChange = (nextMode: string) => {
+    if (nextMode === aiSearchMode) return;
+    invalidateAiResults();
+    setAiSearchMode(nextMode as RagRetrievalMode);
+  };
+
+  const overridePayload = useCallback((): RagRetrievalOverride | undefined => {
+    const payload: RagRetrievalOverride = {};
+    if (overrideForm.recallCount != null)
+      payload.recallCount = overrideForm.recallCount;
+    if (overrideForm.vectorThreshold != null)
+      payload.vectorThreshold = overrideForm.vectorThreshold;
+    if (overrideForm.keywordThreshold != null)
+      payload.keywordThreshold = overrideForm.keywordThreshold;
+    if (overrideForm.rerankModelText.trim())
+      payload.rerankModel = overrideForm.rerankModelText.trim();
+    if (overrideForm.rerankTopK != null)
+      payload.rerankTopK = overrideForm.rerankTopK;
+    if (overrideForm.rerankThreshold != null)
+      payload.rerankThreshold = overrideForm.rerankThreshold;
+    return Object.keys(payload).length > 0 ? payload : undefined;
+  }, [overrideForm]);
 
   // Show error notification when AI search fails
   useEffect(() => {
@@ -126,8 +178,9 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
   const handleFiltersChange = useCallback(
     (newFilters: any) => {
       setFilters(newFilters);
+      invalidateAiResults();
     },
-    [setFilters],
+    [invalidateAiResults],
   );
 
   const handleAskClick = () => {
@@ -140,6 +193,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
       setAiLoading(true);
       semanticSearch(query, filters.spaceId || undefined, {
         mode: aiSearchMode,
+        retrieval: overridePayload(),
       })
         .then((result) => {
           if (aiRequestId.current === requestId) setAiSearchResult(result);
@@ -191,13 +245,23 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
               <SegmentedControl
                 size="xs"
                 value={aiSearchMode}
-                onChange={(value) => setAiSearchMode(value as RagRetrievalMode)}
+                onChange={handleAiModeChange}
                 data={[
                   { value: "hybrid", label: t("Hybrid") },
                   { value: "semantic", label: t("Semantic") },
                   { value: "keyword", label: t("Keyword") },
                 ]}
               />
+              <Tooltip label={t("Retrieval overrides")}>
+                <ActionIcon
+                  variant={overridesOpen ? "light" : "subtle"}
+                  color="gray"
+                  aria-label={t("Retrieval overrides")}
+                  onClick={() => setOverridesOpen((open) => !open)}
+                >
+                  <IconAdjustments size={16} />
+                </ActionIcon>
+              </Tooltip>
               <Button
                 size="xs"
                 leftSection={<IconSparkles size={16} />}
@@ -222,6 +286,104 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
             spaceId={spaceId}
             isAiMode={isAiMode}
           />
+          {isAiMode && hasAiFeature && overridesOpen && (
+            <Stack gap="xs" pb="xs">
+              <Group gap="xs">
+                <Text size="xs" c="dimmed">
+                  {t(
+                    "Per-search overrides; empty fields use workspace defaults.",
+                  )}
+                </Text>
+                <Button
+                  size="compact-xs"
+                  variant="subtle"
+                  onClick={() =>
+                    setOverrideForm({
+                      recallCount: null,
+                      vectorThreshold: null,
+                      keywordThreshold: null,
+                      rerankModelText: "",
+                      rerankTopK: null,
+                      rerankThreshold: null,
+                    })
+                  }
+                >
+                  {t("Reset")}
+                </Button>
+              </Group>
+              <NumberInput
+                label="Recall count"
+                description="Overrides the workspace default for this search (1-100)."
+                min={1}
+                max={100}
+                step={1}
+                w={220}
+                value={overrideForm.recallCount ?? ""}
+                onChange={(value) =>
+                  setOverrideForm((current) => ({
+                    ...current,
+                    recallCount: toOptionalInt(value),
+                  }))
+                }
+              />
+              <Slider
+                label={(value) => `Vector threshold: ${value}`}
+                min={0}
+                max={1}
+                step={0.05}
+                w={220}
+                value={overrideForm.vectorThreshold ?? 0}
+                onChange={(value) =>
+                  setOverrideForm((current) => ({
+                    ...current,
+                    vectorThreshold: value,
+                  }))
+                }
+              />
+              <Slider
+                label={(value) => `Keyword threshold: ${value}`}
+                min={0}
+                max={1}
+                step={0.05}
+                w={220}
+                value={overrideForm.keywordThreshold ?? 0}
+                onChange={(value) =>
+                  setOverrideForm((current) => ({
+                    ...current,
+                    keywordThreshold: value,
+                  }))
+                }
+              />
+              <NumberInput
+                label="Rerank top K"
+                min={1}
+                max={100}
+                step={1}
+                w={220}
+                value={overrideForm.rerankTopK ?? ""}
+                onChange={(value) =>
+                  setOverrideForm((current) => ({
+                    ...current,
+                    rerankTopK: toOptionalInt(value),
+                  }))
+                }
+              />
+              <Slider
+                label={(value) => `Rerank threshold: ${value}`}
+                min={-10}
+                max={10}
+                step={0.1}
+                w={220}
+                value={overrideForm.rerankThreshold ?? 0}
+                onChange={(value) =>
+                  setOverrideForm((current) => ({
+                    ...current,
+                    rerankThreshold: value,
+                  }))
+                }
+              />
+            </Stack>
+          )}
         </div>
 
         <VisuallyHidden role="status" aria-live="polite">
@@ -247,14 +409,19 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
                 (isAiLoading ? (
                   <Spotlight.Empty>{t("Searching...")}</Spotlight.Empty>
                 ) : (
-                  aiSearchResult?.items?.map((result: any) => (
-                    <SearchResultItem
-                      key={result.id}
-                      result={result}
-                      isAttachmentResult={false}
-                      showSpace={!filters.spaceId}
+                  <>
+                    <RetrievalStatusNotice
+                      retrieval={aiSearchResult?.retrieval}
                     />
-                  ))
+                    {aiSearchResult?.items?.map((result: any) => (
+                      <SearchResultItem
+                        key={result.id}
+                        result={result}
+                        isAttachmentResult={false}
+                        showSpace={!filters.spaceId}
+                      />
+                    ))}
+                  </>
                 ))}
               {query.length > 0 && !isAiLoading && !aiSearchResult && (
                 <Spotlight.Empty>{t("No answer available")}</Spotlight.Empty>
@@ -294,4 +461,10 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
       </Spotlight.Root>
     </>
   );
+}
+
+function toOptionalInt(value: string | number): number | null {
+  if (value === "" || value === null || value === undefined) return null;
+  const parsed = typeof value === "number" ? value : Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }

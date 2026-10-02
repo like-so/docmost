@@ -6,11 +6,32 @@ export type AiChat = {
   createdAt: string;
   updatedAt: string;
 };
+export type RagRerankStatus =
+  | "applied"
+  | "not_configured"
+  | "failed"
+  | "not_applicable";
+
+export type RagRetrievalMetadata = {
+  mode: RagRetrievalMode;
+  rerankStatus: RagRerankStatus;
+};
+
+export type RagSourceReference = {
+  citationId: string;
+  pageId: string;
+  title: string;
+  url: string;
+  locator: unknown;
+};
+
 export type AiMessage = {
   id: string;
   role: "user" | "assistant";
   content: string | null;
   createdAt: string;
+  retrieval?: RagRetrievalMetadata;
+  sources?: RagSourceReference[];
 };
 export type AiProvider = {
   configured: boolean;
@@ -194,6 +215,7 @@ export async function semanticSearch(
   return (await api.post("/ai/search", { query, spaceId, ...options }))
     .data as {
     items: unknown[];
+    retrieval?: RagRetrievalMetadata;
   };
 }
 

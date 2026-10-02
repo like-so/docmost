@@ -46,8 +46,23 @@ vi.mock("./search-result-item.tsx", () => ({
   ),
 }));
 vi.mock("./search-spotlight-filters.tsx", () => ({
-  SearchSpotlightFilters: ({ onAskClick }: { onAskClick: () => void }) => (
-    <button onClick={onAskClick}>Toggle AI</button>
+  SearchSpotlightFilters: ({
+    onAskClick,
+    onFiltersChange,
+  }: {
+    onAskClick: () => void;
+    onFiltersChange: (filters: Record<string, unknown>) => void;
+  }) => (
+    <>
+      <button onClick={onAskClick}>Toggle AI</button>
+      <button
+        onClick={() =>
+          onFiltersChange({ contentType: "page", spaceId: "space-2" })
+        }
+      >
+        Change filters
+      </button>
+    </>
   ),
 }));
 vi.mock("@mantine/spotlight", () => ({
@@ -110,6 +125,7 @@ describe("AI search query changes", () => {
     expect(await screen.findByText("First answer")).toBeTruthy();
     expect(api.semanticSearch).toHaveBeenCalledWith("first", undefined, {
       mode: "hybrid",
+      retrieval: undefined,
     });
     fireEvent.click(screen.getByRole("button", { name: "Keep query" }));
     expect(screen.getByText("First answer")).toBeTruthy();
@@ -135,6 +151,7 @@ describe("AI search query changes", () => {
     expect(await screen.findByText("First answer")).toBeTruthy();
     expect(api.semanticSearch).toHaveBeenLastCalledWith("good", undefined, {
       mode: "hybrid",
+      retrieval: undefined,
     });
   });
   it("ignores a stale answer after a newer query completes", async () => {
@@ -168,5 +185,89 @@ describe("AI search query changes", () => {
     await act(async () => resolveFirst!({ items: [{ id: "First answer" }] }));
     expect(screen.queryByText("First answer")).toBeNull();
     expect(screen.getByText("Second answer")).toBeTruthy();
+  });
+});
+
+describe("AI search control changes", () => {
+  it("discards a deferred answer when the retrieval mode changes", async () => {
+    let resolveFirst: (value: { items: { id: string }[] }) => void;
+    api.semanticSearch
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValue({ items: [{ id: "Semantic answer" }] });
+    show();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    fireEvent.change(screen.getByLabelText("Query"), {
+      target: { value: "first" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    fireEvent.click(screen.getByText("Semantic"));
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(api.semanticSearch).toHaveBeenLastCalledWith("first", undefined, {
+      mode: "semantic",
+      retrieval: undefined,
+    });
+    await act(async () => resolveFirst!({ items: [{ id: "Stale answer" }] }));
+    expect(screen.queryByText("Stale answer")).toBeNull();
+    expect(await screen.findByText("Semantic answer")).toBeTruthy();
+  });
+
+  it("discards the previous answer when filters change the effective scope", async () => {
+    show();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    fireEvent.change(screen.getByLabelText("Query"), {
+      target: { value: "scoped" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(await screen.findByText("First answer")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Change filters" }));
+    expect(screen.queryByText("First answer")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(api.semanticSearch).toHaveBeenLastCalledWith("scoped", "space-2", {
+      mode: "hybrid",
+      retrieval: undefined,
+    });
+  });
+
+  it("sends per-search retrieval overrides with the request", async () => {
+    show();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retrieval overrides" }),
+    );
+    fireEvent.change(await screen.findByLabelText("Recall count"), {
+      target: { value: "7" },
+    });
+    fireEvent.change(screen.getByLabelText("Query"), {
+      target: { value: "first" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() =>
+      expect(api.semanticSearch).toHaveBeenCalledWith("first", undefined, {
+        mode: "hybrid",
+        retrieval: { recallCount: 7 },
+      }),
+    );
+  });
+
+  it("renders the runtime rerank fallback status instead of claiming reranking ran", async () => {
+    api.semanticSearch.mockResolvedValue({
+      items: [{ id: "Fallback answer" }],
+      retrieval: { mode: "hybrid", rerankStatus: "failed" },
+    });
+    show();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    fireEvent.change(screen.getByLabelText("Query"), {
+      target: { value: "fallback" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(await screen.findByText("Fallback answer")).toBeTruthy();
+    expect(
+      screen.getByText("Reranking failed; results keep the retrieval order."),
+    ).toBeTruthy();
   });
 });

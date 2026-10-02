@@ -1,8 +1,11 @@
 import {
   Alert,
+  Anchor,
   Button,
   Group,
+  NumberInput,
   Select,
+  Slider,
   Stack,
   Text,
   Title,
@@ -17,9 +20,46 @@ import {
   sendChatMessage,
   uploadChatAttachment,
   type AiMessage,
+  type RagRetrievalOverride,
 } from "../services/ai-service";
 import type { ChatAttachment } from "../components/chat-input";
 import { useGetSpacesQuery } from "@/features/space/queries/space-query";
+import { RetrievalStatusNotice } from "../components/retrieval-status-notice";
+
+type ChatOverrideForm = {
+  recallCount: number | null;
+  vectorThreshold: number | null;
+  keywordThreshold: number | null;
+  rerankModelText: string;
+  rerankTopK: number | null;
+  rerankThreshold: number | null;
+};
+
+const EMPTY_CHAT_OVERRIDES: ChatOverrideForm = {
+  recallCount: null,
+  vectorThreshold: null,
+  keywordThreshold: null,
+  rerankModelText: "",
+  rerankTopK: null,
+  rerankThreshold: null,
+};
+
+function chatOverridePayload(
+  form: ChatOverrideForm,
+): RagRetrievalOverride | undefined {
+  const payload: RagRetrievalOverride = {};
+  if (form.recallCount != null) payload.recallCount = form.recallCount;
+  if (form.vectorThreshold != null)
+    payload.vectorThreshold = form.vectorThreshold;
+  if (form.keywordThreshold != null)
+    payload.keywordThreshold = form.keywordThreshold;
+  if (form.rerankModelText.trim())
+    payload.rerankModel = form.rerankModelText.trim();
+  if (form.rerankTopK != null) payload.rerankTopK = form.rerankTopK;
+  if (form.rerankThreshold != null)
+    payload.rerankThreshold = form.rerankThreshold;
+  return Object.keys(payload).length > 0 ? payload : undefined;
+}
 
 export default function AiChat() {
   const { chatId } = useParams();
@@ -34,6 +74,9 @@ export default function AiChat() {
   const createdChatId = useRef<string | null>(null);
   const [scopeSpaceId, setScopeSpaceId] = useState<string | null>(null);
   const { data: spacesData } = useGetSpacesQuery({ limit: 100 });
+  const [overridesOpen, setOverridesOpen] = useState(false);
+  const [overrides, setOverrides] =
+    useState<ChatOverrideForm>(EMPTY_CHAT_OVERRIDES);
   useEffect(() => {
     if (chatId)
       getChat(chatId)
@@ -61,7 +104,10 @@ export default function AiChat() {
         content,
         attachments.map((attachment) => attachment.id),
         activeRequest,
-        { spaceId: scopeSpaceId || undefined },
+        {
+          spaceId: scopeSpaceId || undefined,
+          retrieval: chatOverridePayload(overrides),
+        },
       );
       setMessages((current) => [...current, result.message, result.assistant]);
     } catch {
@@ -104,9 +150,32 @@ export default function AiChat() {
       {error && <Alert color="red">{error}</Alert>}
       <Stack>
         {messages.map((message) => (
-          <Text key={message.id} fw={message.role === "assistant" ? 400 : 700}>
-            {message.content}
-          </Text>
+          <Stack key={message.id} gap="xs">
+            <Text fw={message.role === "assistant" ? 400 : 700}>
+              {message.content}
+            </Text>
+            {message.role === "assistant" && (
+              <>
+                <RetrievalStatusNotice retrieval={message.retrieval} />
+                {(message.sources?.length ?? 0) > 0 && (
+                  <Stack gap={4}>
+                    <Text size="xs" c="dimmed">
+                      Sources
+                    </Text>
+                    {message.sources!.map((source) => (
+                      <Anchor
+                        key={source.citationId}
+                        href={source.url}
+                        size="xs"
+                      >
+                        [{source.citationId}] {source.title || source.pageId}
+                      </Anchor>
+                    ))}
+                  </Stack>
+                )}
+              </>
+            )}
+          </Stack>
         ))}
       </Stack>
       <ChatInput
@@ -128,7 +197,101 @@ export default function AiChat() {
           value={scopeSpaceId}
           onChange={(value) => setScopeSpaceId(value || null)}
         />
+        <Button
+          size="xs"
+          variant={overridesOpen ? "light" : "default"}
+          onClick={() => setOverridesOpen((open) => !open)}
+        >
+          Retrieval overrides
+        </Button>
       </Group>
+      {overridesOpen && (
+        <Stack gap="xs">
+          <Group gap="xs">
+            <Text size="xs" c="dimmed">
+              Per-message overrides; empty fields use chat defaults.
+            </Text>
+            <Button
+              size="compact-xs"
+              variant="subtle"
+              onClick={() => setOverrides(EMPTY_CHAT_OVERRIDES)}
+            >
+              Reset
+            </Button>
+          </Group>
+          <Group gap="md">
+            <NumberInput
+              label="Recall count"
+              description="1-50 for chat retrieval."
+              min={1}
+              max={50}
+              step={1}
+              w={200}
+              value={overrides.recallCount ?? ""}
+              onChange={(value) =>
+                setOverrides((current) => ({
+                  ...current,
+                  recallCount: toOptionalInt(value),
+                }))
+              }
+            />
+            <NumberInput
+              label="Rerank top K"
+              description="1-20 for chat retrieval."
+              min={1}
+              max={20}
+              step={1}
+              w={200}
+              value={overrides.rerankTopK ?? ""}
+              onChange={(value) =>
+                setOverrides((current) => ({
+                  ...current,
+                  rerankTopK: toOptionalInt(value),
+                }))
+              }
+            />
+          </Group>
+          <Slider
+            label={(value) => `Vector threshold: ${value}`}
+            min={0}
+            max={1}
+            step={0.01}
+            value={overrides.vectorThreshold ?? 0}
+            onChange={(value) =>
+              setOverrides((current) => ({
+                ...current,
+                vectorThreshold: value,
+              }))
+            }
+          />
+          <Slider
+            label={(value) => `Keyword threshold: ${value}`}
+            min={0}
+            max={1}
+            step={0.01}
+            value={overrides.keywordThreshold ?? 0}
+            onChange={(value) =>
+              setOverrides((current) => ({
+                ...current,
+                keywordThreshold: value,
+              }))
+            }
+          />
+          <Slider
+            label={(value) => `Rerank threshold: ${value}`}
+            min={-10}
+            max={10}
+            step={0.01}
+            value={overrides.rerankThreshold ?? 0}
+            onChange={(value) =>
+              setOverrides((current) => ({
+                ...current,
+                rerankThreshold: value,
+              }))
+            }
+          />
+        </Stack>
+      )}
       {busy && requestId && activeChatId && (
         <Button
           variant="default"
@@ -139,4 +302,10 @@ export default function AiChat() {
       )}
     </Stack>
   );
+}
+
+function toOptionalInt(value: string | number): number | null {
+  if (value === "" || value === null || value === undefined) return null;
+  const parsed = typeof value === "number" ? value : Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }
