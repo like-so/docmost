@@ -645,4 +645,115 @@ describe('AiService settings and policy', () => {
       rerankStatus: 'applied',
     });
   });
+
+  it('drops a citation source revoked while the model call is in flight', async () => {
+    const instance = service();
+    instance.readProvider = jest.fn().mockReturnValue({
+      driver: 'openai',
+      baseUrl: 'https://ai.example.test',
+      chatModel: 'chat',
+      apiKey: 'secret',
+    });
+    let p1Authorized = true;
+    instance['pageAccessService'].validateCanView = jest
+      .fn()
+      .mockImplementation((page: any) =>
+        page.id === 'p1' && p1Authorized
+          ? Promise.resolve()
+          : Promise.reject(new Error('forbidden')),
+      );
+
+    const messagesNode: any = {};
+    for (const method of ['select', 'where', 'orderBy']) {
+      messagesNode[method] = () => messagesNode;
+    }
+    messagesNode.limit = () => ({
+      execute: jest
+        .fn()
+        .mockResolvedValue([{ role: 'user', content: 'question' }]),
+    });
+    const freshnessNode: any = {};
+    for (const method of ['innerJoin', 'where', 'whereRef', 'select']) {
+      freshnessNode[method] = () => freshnessNode;
+    }
+    freshnessNode.execute = jest
+      .fn()
+      .mockResolvedValue([{ pageId: 'p1', inputRevision: '2' }]);
+    const pagesNode: any = {};
+    for (const method of ['select', 'where']) {
+      pagesNode[method] = () => pagesNode;
+    }
+    pagesNode.execute = jest
+      .fn()
+      .mockResolvedValue([{ id: 'p1', spaceId: 's1' }]);
+    instance.db.selectFrom.mockImplementation((table: string) => {
+      if (table === 'aiChatMessages') return messagesNode;
+      if (table.startsWith('ragSourceState')) return freshnessNode;
+      return pagesNode;
+    });
+
+    instance['ragChatRetrieval'].retrieveForChat.mockResolvedValue({
+      evidence: [
+        {
+          chunkId: 'c1',
+          key: { workspaceId: 'ws', pageId: 'p1' },
+          inputRevision: '2',
+          text: 'fresh',
+          locator: null,
+          score: { kind: 'rrf', value: 1 },
+        },
+      ],
+      rewrittenQuery: '',
+      rewriteApplied: false,
+      expansionVariants: [],
+      retrieval: { mode: 'hybrid', rerankStatus: 'applied' },
+    });
+
+    const release = jest.fn();
+    instance.outboundAgent.lease = jest.fn().mockResolvedValue({
+      dispatcher: {},
+      release,
+    });
+    const response = {
+      statusCode: 200,
+      body: {
+        json: jest
+          .fn()
+          .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+      },
+    } as unknown as Awaited<ReturnType<typeof undici.request>>;
+    // The page loses authorization while the provider call is in flight:
+    // revalidation already ran (pre-model), hydration runs after the
+    // response, so the flip lands between them.
+    jest.spyOn(undici, 'request').mockImplementation(async () => {
+      p1Authorized = false;
+      return response;
+    });
+
+    let persisted: any;
+    instance.db.insertInto.mockImplementation(() => ({
+      values: (values: any) => {
+        persisted = values;
+        return {
+          returning: () => ({
+            executeTakeFirstOrThrow: jest
+              .fn()
+              .mockResolvedValue({ id: 'm1' }),
+          }),
+        };
+      },
+    }));
+
+    await instance.complete(user, workspace, 'chat', 'request');
+
+    // The answer is persisted, but the in-flight-revoked page never becomes
+    // a stored citation source; retrieval metadata is preserved.
+    expect(persisted.content).toBe('ok');
+    expect(persisted.metadata.retrieval).toEqual({
+      mode: 'hybrid',
+      rerankStatus: 'applied',
+    });
+    expect(persisted.metadata.sources).toEqual([]);
+    expect(release).toHaveBeenCalled();
+  });
 });
