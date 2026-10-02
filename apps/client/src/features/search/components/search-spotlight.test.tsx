@@ -363,6 +363,32 @@ describe("AI search control changes", () => {
     });
   });
 
+  it("applies successive custom-model edits to the request payload", async () => {
+    api.semanticSearch.mockResolvedValue({ items: [{ id: "Answer" }] });
+    show();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retrieval overrides" }),
+    );
+    fireEvent.click(screen.getByText("Custom model"));
+    fireEvent.change(await screen.findByLabelText("Model reference"), {
+      target: { value: "rerank-model-a" },
+    });
+    fireEvent.change(screen.getByLabelText("Model reference"), {
+      target: { value: "rerank-model-b" },
+    });
+    fireEvent.change(screen.getByLabelText("Query"), {
+      target: { value: "first" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() =>
+      expect(api.semanticSearch).toHaveBeenLastCalledWith("first", undefined, {
+        mode: "hybrid",
+        retrieval: { rerankModel: "rerank-model-b" },
+      }),
+    );
+  });
+
   it("sends rerank-model override inheritance, reference, and explicit clear", async () => {
     show();
     fireEvent.click(screen.getByRole("button", { name: "Toggle AI" }));

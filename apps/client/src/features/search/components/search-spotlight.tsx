@@ -410,12 +410,15 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
                   description="Authorized model reference; the server validates it."
                   w={220}
                   value={overrideForm.rerankModelText}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    // React nulls currentTarget once dispatch ends; the queued
+                    // updater runs later, so the value must be captured here.
+                    const value = event.currentTarget.value;
                     updateOverrideForm((current) => ({
                       ...current,
-                      rerankModelText: event.currentTarget.value,
-                    }))
-                  }
+                      rerankModelText: value,
+                    }));
+                  }}
                 />
               )}
               <NumberInput

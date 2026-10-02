@@ -321,12 +321,15 @@ export default function AiChat() {
               description="Authorized model reference; the server validates it."
               w={200}
               value={overrides.rerankModelText}
-              onChange={(event) =>
+              onChange={(event) => {
+                // React nulls currentTarget once dispatch ends; the queued
+                // updater runs later, so the value must be captured here.
+                const value = event.currentTarget.value;
                 setOverrides((current) => ({
                   ...current,
-                  rerankModelText: event.currentTarget.value,
-                }))
-              }
+                  rerankModelText: value,
+                }));
+              }}
             />
           )}
           <Slider
