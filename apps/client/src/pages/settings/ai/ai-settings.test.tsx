@@ -250,4 +250,101 @@ describe("retrieval settings save and readback", () => {
       api.updateRagRetrievalSettings.mock.calls[1]?.[0],
     );
   });
+
+  it("lands successive settings inputs in the saved payloads", async () => {
+    show();
+    const searchModel = await screen.findByLabelText("Rerank model");
+    fireEvent.change(searchModel, { target: { value: "model-a" } });
+    fireEvent.change(searchModel, { target: { value: "model-b" } });
+    const chatModel = screen.getByLabelText("Chat rerank model");
+    fireEvent.change(chatModel, { target: { value: "rerank-x" } });
+    fireEvent.change(chatModel, { target: { value: "rerank-y" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save retrieval settings" }),
+    );
+    await waitFor(() =>
+      expect(api.updateRagRetrievalSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          search: expect.objectContaining({ rerankModel: "model-b" }),
+          chat: expect.objectContaining({ rerankModel: "rerank-y" }),
+        }),
+      ),
+    );
+    const embeddingModel = await screen.findByLabelText(
+      "Index embedding model",
+    );
+    fireEvent.change(embeddingModel, {
+      target: { value: "text-embedding-3-large" },
+    });
+    fireEvent.change(embeddingModel, {
+      target: { value: "text-embedding-ada-002" },
+    });
+    fireEvent.change(screen.getByLabelText("Embedding dimensions"), {
+      target: { value: "1536" },
+    });
+    fireEvent.change(screen.getByLabelText("Embedding max input tokens"), {
+      target: { value: "8191" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create index profile" }),
+    );
+    await waitFor(() =>
+      expect(api.updateRagSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          indexProfileConfig: expect.objectContaining({
+            embedding: expect.objectContaining({
+              model: "text-embedding-ada-002",
+            }),
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("applies repeated toggle changes from the last toggle state", async () => {
+    show();
+    const rewrite = await screen.findByRole("switch", {
+      name: "Rewrite follow-up questions with conversation history",
+    });
+    fireEvent.click(rewrite);
+    fireEvent.click(rewrite);
+    fireEvent.click(rewrite);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save retrieval settings" }),
+    );
+    await waitFor(() =>
+      expect(api.updateRagRetrievalSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          chat: expect.objectContaining({ rewriteEnabled: false }),
+        }),
+      ),
+    );
+    const vectorChannel = await screen.findByRole("switch", {
+      name: "Vector channel (semantic recall)",
+    });
+    fireEvent.click(vectorChannel);
+    fireEvent.click(vectorChannel);
+    fireEvent.click(vectorChannel);
+    fireEvent.change(screen.getByLabelText("Index embedding model"), {
+      target: { value: "text-embedding-3-small" },
+    });
+    fireEvent.change(screen.getByLabelText("Embedding dimensions"), {
+      target: { value: "1536" },
+    });
+    fireEvent.change(screen.getByLabelText("Embedding max input tokens"), {
+      target: { value: "8191" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create index profile" }),
+    );
+    await waitFor(() =>
+      expect(api.updateRagSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          indexProfileConfig: expect.objectContaining({
+            indexingStrategy: { vectorEnabled: false, keywordEnabled: true },
+          }),
+        }),
+      ),
+    );
+  });
 });

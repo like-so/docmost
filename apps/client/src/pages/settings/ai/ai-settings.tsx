@@ -455,13 +455,12 @@ export default function AiSettings() {
               label="Rerank model"
               description="Without a configured rerank model, results keep the fusion order and search reports reranking as not configured."
               value={retrieval.rerankModelText}
-              onChange={(event) =>
+              onChange={(event) => {
+                const value = event.currentTarget.value;
                 setRetrieval((current) =>
-                  current
-                    ? { ...current, rerankModelText: event.currentTarget.value }
-                    : current,
-                )
-              }
+                  current ? { ...current, rerankModelText: value } : current,
+                );
+              }}
             />
             <NumberInput
               label="Rerank top K"
@@ -552,13 +551,12 @@ export default function AiSettings() {
               label="Chat rerank model"
               description="Without a configured chat rerank model, chat answers report reranking as not configured."
               value={chat.rerankModelText}
-              onChange={(event) =>
+              onChange={(event) => {
+                const value = event.currentTarget.value;
                 setChat((current) =>
-                  current
-                    ? { ...current, rerankModelText: event.currentTarget.value }
-                    : current,
-                )
-              }
+                  current ? { ...current, rerankModelText: value } : current,
+                );
+              }}
             />
             <NumberInput
               label="Chat rerank top K"
@@ -598,76 +596,60 @@ export default function AiSettings() {
             <Switch
               label="Rewrite follow-up questions with conversation history"
               checked={chat.rewriteEnabled}
-              onChange={(event) =>
+              onChange={(event) => {
+                const checked = event.currentTarget.checked;
                 setChat((current) =>
-                  current
-                    ? {
-                        ...current,
-                        rewriteEnabled: event.currentTarget.checked,
-                      }
-                    : current,
-                )
-              }
+                  current ? { ...current, rewriteEnabled: checked } : current,
+                );
+              }}
             />
             <Switch
               label="Expand queries into alternative phrasings"
               checked={chat.expansionEnabled}
-              onChange={(event) =>
+              onChange={(event) => {
+                const checked = event.currentTarget.checked;
                 setChat((current) =>
-                  current
-                    ? {
-                        ...current,
-                        expansionEnabled: event.currentTarget.checked,
-                      }
-                    : current,
-                )
-              }
+                  current ? { ...current, expansionEnabled: checked } : current,
+                );
+              }}
             />
             <TextInput
               label="Query understanding model"
               description="Empty uses the workspace chat model."
               value={chat.queryUnderstandingModelText}
-              onChange={(event) =>
+              onChange={(event) => {
+                const value = event.currentTarget.value;
                 setChat((current) =>
                   current
-                    ? {
-                        ...current,
-                        queryUnderstandingModelText: event.currentTarget.value,
-                      }
+                    ? { ...current, queryUnderstandingModelText: value }
                     : current,
-                )
-              }
+                );
+              }}
             />
             <Textarea
               label="Rewrite system prompt"
               description="Empty uses the built-in default prompt."
               minRows={3}
               value={chat.rewriteSystemPrompt}
-              onChange={(event) =>
+              onChange={(event) => {
+                const value = event.currentTarget.value;
                 setChat((current) =>
                   current
-                    ? {
-                        ...current,
-                        rewriteSystemPrompt: event.currentTarget.value,
-                      }
+                    ? { ...current, rewriteSystemPrompt: value }
                     : current,
-                )
-              }
+                );
+              }}
             />
             <Textarea
               label="Rewrite user prompt"
               minRows={3}
               value={chat.rewriteUserPrompt}
-              onChange={(event) =>
+              onChange={(event) => {
+                const value = event.currentTarget.value;
                 setChat((current) =>
-                  current
-                    ? {
-                        ...current,
-                        rewriteUserPrompt: event.currentTarget.value,
-                      }
-                    : current,
-                )
-              }
+                  current ? { ...current, rewriteUserPrompt: value } : current,
+                );
+              }}
             />
           </Stack>
           <Button mt="md" onClick={saveRetrieval}>
@@ -700,13 +682,12 @@ export default function AiSettings() {
           <Switch
             label="Workspace knowledge indexing enabled"
             checked={ragSettings?.enabled ?? false}
-            onChange={(event) =>
+            onChange={(event) => {
+              const checked = event.currentTarget.checked;
               setRagSettings((current) =>
-                current
-                  ? { ...current, enabled: event.currentTarget.checked }
-                  : current,
-              )
-            }
+                current ? { ...current, enabled: checked } : current,
+              );
+            }}
           />
           <NumberInput
             label="Chunk size (tokens)"
@@ -738,12 +719,13 @@ export default function AiSettings() {
             label="Index embedding model"
             description="Embeddings run through the openai-compatible provider configured above."
             value={profileForm.embeddingModel}
-            onChange={(event) =>
+            onChange={(event) => {
+              const value = event.currentTarget.value;
               setProfileForm((current) => ({
                 ...current,
-                embeddingModel: event.currentTarget.value,
-              }))
-            }
+                embeddingModel: value,
+              }));
+            }}
           />
           <NumberInput
             label="Embedding dimensions"
@@ -775,45 +757,49 @@ export default function AiSettings() {
             label="Embedding tokenizer"
             description="Optional tokenizer identifier; empty uses the model default."
             value={profileForm.embeddingTokenizerIdText}
-            onChange={(event) =>
+            onChange={(event) => {
+              const value = event.currentTarget.value;
               setProfileForm((current) => ({
                 ...current,
-                embeddingTokenizerIdText: event.currentTarget.value,
-              }))
-            }
+                embeddingTokenizerIdText: value,
+              }));
+            }}
           />
           <TextInput
             label="Parser version"
             description="Pipeline identity for document parsing; changing it reindexes sources."
             value={profileForm.parserVersion}
-            onChange={(event) =>
+            onChange={(event) => {
+              const value = event.currentTarget.value;
               setProfileForm((current) => ({
                 ...current,
-                parserVersion: event.currentTarget.value,
-              }))
-            }
+                parserVersion: value,
+              }));
+            }}
           />
           <TextInput
             label="Chunker version"
             description="Pipeline identity for chunking; changing it reindexes sources."
             value={profileForm.chunkerVersion}
-            onChange={(event) =>
+            onChange={(event) => {
+              const value = event.currentTarget.value;
               setProfileForm((current) => ({
                 ...current,
-                chunkerVersion: event.currentTarget.value,
-              }))
-            }
+                chunkerVersion: value,
+              }));
+            }}
           />
           <TextInput
             label="Required MIME types"
             description="Comma-separated MIME types parsed with image interpretation."
             value={profileForm.requiredMimeTypesText}
-            onChange={(event) =>
+            onChange={(event) => {
+              const value = event.currentTarget.value;
               setProfileForm((current) => ({
                 ...current,
-                requiredMimeTypesText: event.currentTarget.value,
-              }))
-            }
+                requiredMimeTypesText: value,
+              }));
+            }}
           />
           <Select
             label="Image interpretation"
@@ -833,22 +819,24 @@ export default function AiSettings() {
           <Switch
             label="Vector channel (semantic recall)"
             checked={indexing.vectorEnabled}
-            onChange={(event) =>
+            onChange={(event) => {
+              const checked = event.currentTarget.checked;
               setIndexing((current) => ({
                 ...current,
-                vectorEnabled: event.currentTarget.checked,
-              }))
-            }
+                vectorEnabled: checked,
+              }));
+            }}
           />
           <Switch
             label="Keyword channel (full-text recall)"
             checked={indexing.keywordEnabled}
-            onChange={(event) =>
+            onChange={(event) => {
+              const checked = event.currentTarget.checked;
               setIndexing((current) => ({
                 ...current,
-                keywordEnabled: event.currentTarget.checked,
-              }))
-            }
+                keywordEnabled: checked,
+              }));
+            }}
           />
           <Button
             onClick={saveIndexing}
