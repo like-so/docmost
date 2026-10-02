@@ -9,6 +9,17 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SearchSpotlight } from "./search-spotlight";
+
+if (!globalThis.ResizeObserver) {
+  class ResizeObserverStub {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    value: ResizeObserverStub,
+  });
+}
 const api = vi.hoisted(() => ({ semanticSearch: vi.fn(), show: vi.fn() }));
 vi.mock("@/features/ai/services/ai-service", () => ({
   semanticSearch: api.semanticSearch,
@@ -97,7 +108,9 @@ describe("AI search query changes", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
     expect(await screen.findByText("First answer")).toBeTruthy();
-    expect(api.semanticSearch).toHaveBeenCalledWith("first", undefined);
+    expect(api.semanticSearch).toHaveBeenCalledWith("first", undefined, {
+      mode: "hybrid",
+    });
     fireEvent.click(screen.getByRole("button", { name: "Keep query" }));
     expect(screen.getByText("First answer")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Query"), {
@@ -120,7 +133,9 @@ describe("AI search query changes", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
     expect(await screen.findByText("First answer")).toBeTruthy();
-    expect(api.semanticSearch).toHaveBeenLastCalledWith("good", undefined);
+    expect(api.semanticSearch).toHaveBeenLastCalledWith("good", undefined, {
+      mode: "hybrid",
+    });
   });
   it("ignores a stale answer after a newer query completes", async () => {
     let resolveFirst: (value: { items: { id: string }[] }) => void;

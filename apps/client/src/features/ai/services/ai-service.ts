@@ -51,6 +51,7 @@ export async function sendChatMessage(
   content: string,
   attachmentIds: string[] = [],
   requestId?: string,
+  options?: { spaceId?: string; retrieval?: RagRetrievalOverride },
 ) {
   return (
     await api.post("/ai/chats/message", {
@@ -58,6 +59,8 @@ export async function sendChatMessage(
       content,
       attachmentIds,
       requestId,
+      spaceId: options?.spaceId,
+      retrieval: options?.retrieval,
     })
   ).data as { message: AiMessage; assistant: AiMessage };
 }
@@ -83,8 +86,113 @@ export async function uploadChatAttachment(
     })
   ).data;
 }
-export async function semanticSearch(query: string, spaceId?: string) {
-  return (await api.post("/ai/search", { query, spaceId })).data as {
+export type RagRetrievalMode = "hybrid" | "semantic" | "keyword";
+
+export type RagRetrievalConfig = {
+  recallCount: number;
+  vectorThreshold: number;
+  keywordThreshold: number;
+  rerankModel: string | null;
+  rerankTopK: number;
+  rerankThreshold: number;
+};
+
+export type RagChatRetrievalConfig = RagRetrievalConfig & {
+  rewriteEnabled: boolean;
+  expansionEnabled: boolean;
+  queryUnderstandingModel: string | null;
+  rewriteSystemPrompt: string;
+  rewriteUserPrompt: string;
+};
+
+export type RagRetrievalOverride = Partial<
+  Pick<
+    RagRetrievalConfig,
+    | "recallCount"
+    | "vectorThreshold"
+    | "keywordThreshold"
+    | "rerankModel"
+    | "rerankTopK"
+    | "rerankThreshold"
+  >
+>;
+
+export type RagRetrievalSettingsView = {
+  search: RagRetrievalConfig;
+  chat: RagChatRetrievalConfig;
+};
+
+export type RagIndexingStrategy = {
+  vectorEnabled: boolean;
+  keywordEnabled: boolean;
+};
+
+export type RagIndexProfileConfig = {
+  parserVersion: string;
+  chunkerVersion: string;
+  maxChunkTokens: number;
+  overlapTokens: number;
+  sourcePolicy: {
+    requiredMimeTypes: string[];
+    imageInterpretation: "disabled" | "required";
+  };
+  embedding: {
+    driver: string;
+    endpointIdentity: string | null;
+    model: string;
+    dimensions: number;
+    tokenizerId: string | null;
+    maxInputTokens: number;
+  };
+  indexingStrategy?: RagIndexingStrategy;
+};
+
+export type RagIndexProfile = RagIndexProfileConfig & {
+  profileId: string;
+  profileHash: string;
+};
+
+export type RagSettingsView = {
+  enabled: boolean;
+  indexProfile: RagIndexProfile | null;
+};
+
+export async function getRagRetrievalSettings(): Promise<RagRetrievalSettingsView> {
+  return (await api.get("/ai/rag/retrieval-settings"))
+    .data as RagRetrievalSettingsView;
+}
+
+export async function updateRagRetrievalSettings(input: {
+  search?: Partial<RagRetrievalConfig>;
+  chat?: Partial<RagChatRetrievalConfig>;
+}): Promise<RagRetrievalSettingsView> {
+  return (await api.post("/ai/rag/retrieval-settings/update", input))
+    .data as RagRetrievalSettingsView;
+}
+
+export async function getRagSettings(): Promise<RagSettingsView> {
+  return (await api.post("/ai/rag/settings")).data as RagSettingsView;
+}
+
+export async function updateRagSettings(input: {
+  enabled: boolean;
+  indexProfileConfig: RagIndexProfileConfig;
+}): Promise<RagSettingsView> {
+  return (await api.post("/ai/rag/settings/update", input))
+    .data as RagSettingsView;
+}
+
+export async function semanticSearch(
+  query: string,
+  spaceId?: string,
+  options?: {
+    titleOnly?: boolean;
+    mode?: RagRetrievalMode;
+    retrieval?: RagRetrievalOverride;
+  },
+) {
+  return (await api.post("/ai/search", { query, spaceId, ...options }))
+    .data as {
     items: unknown[];
   };
 }

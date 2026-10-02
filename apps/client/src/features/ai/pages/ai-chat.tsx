@@ -1,4 +1,12 @@
-import { Alert, Button, Group, Stack, Text, Title } from "@mantine/core";
+import {
+  Alert,
+  Button,
+  Group,
+  Select,
+  Stack,
+  Text,
+  Title,
+} from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import ChatInput from "../components/chat-input";
@@ -11,6 +19,7 @@ import {
   type AiMessage,
 } from "../services/ai-service";
 import type { ChatAttachment } from "../components/chat-input";
+import { useGetSpacesQuery } from "@/features/space/queries/space-query";
 
 export default function AiChat() {
   const { chatId } = useParams();
@@ -23,6 +32,8 @@ export default function AiChat() {
   const [activeChatId, setActiveChatId] = useState<string>();
   const initialSent = useRef(false);
   const createdChatId = useRef<string | null>(null);
+  const [scopeSpaceId, setScopeSpaceId] = useState<string | null>(null);
+  const { data: spacesData } = useGetSpacesQuery({ limit: 100 });
   useEffect(() => {
     if (chatId)
       getChat(chatId)
@@ -50,6 +61,7 @@ export default function AiChat() {
         content,
         attachments.map((attachment) => attachment.id),
         activeRequest,
+        { spaceId: scopeSpaceId || undefined },
       );
       setMessages((current) => [...current, result.message, result.assistant]);
     } catch {
@@ -65,9 +77,10 @@ export default function AiChat() {
     return uploadChatAttachment(id, file);
   };
   useEffect(() => {
-    const initial = location.state as
-      | { initialContent?: string; initialAttachments?: ChatAttachment[] }
-      | null;
+    const initial = location.state as {
+      initialContent?: string;
+      initialAttachments?: ChatAttachment[];
+    } | null;
     const initialContent = initial?.initialContent ?? "";
     const initialAttachments = initial?.initialAttachments ?? [];
     if (
@@ -101,6 +114,21 @@ export default function AiChat() {
         onSend={(content, _mentions, attachments) => send(content, attachments)}
         onUpload={uploadAttachment}
       />
+      <Group gap="xs">
+        <Select
+          size="xs"
+          w={220}
+          label="Knowledge scope for new messages"
+          placeholder="All spaces"
+          clearable
+          data={(spacesData?.items ?? []).map((space) => ({
+            value: space.id,
+            label: space.name,
+          }))}
+          value={scopeSpaceId}
+          onChange={(value) => setScopeSpaceId(value || null)}
+        />
+      </Group>
       {busy && requestId && activeChatId && (
         <Button
           variant="default"

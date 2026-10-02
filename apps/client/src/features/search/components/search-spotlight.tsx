@@ -1,6 +1,12 @@
 import { Spotlight } from "@mantine/spotlight";
 import { IconSearch, IconSparkles } from "@tabler/icons-react";
-import { Group, Button, VisuallyHidden, Text } from "@mantine/core";
+import {
+  Group,
+  Button,
+  VisuallyHidden,
+  Text,
+  SegmentedControl,
+} from "@mantine/core";
 import React, {
   useState,
   useMemo,
@@ -17,7 +23,10 @@ import { useUnifiedSearch } from "../hooks/use-unified-search.ts";
 import { SearchResultItem } from "./search-result-item.tsx";
 import { useAtomValue } from "jotai";
 import { workspaceAtom } from "@/features/user/atoms/current-user-atom.ts";
-import { semanticSearch } from "@/features/ai/services/ai-service";
+import {
+  semanticSearch,
+  type RagRetrievalMode,
+} from "@/features/ai/services/ai-service";
 
 interface SearchSpotlightProps {
   spaceId?: string;
@@ -38,6 +47,7 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
     contentType: "page",
   });
   const [isAiMode, setIsAiMode] = useState(false);
+  const [aiSearchMode, setAiSearchMode] = useState<RagRetrievalMode>("hybrid");
 
   // Build unified search params
   const searchParams = useMemo(() => {
@@ -128,7 +138,9 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
     if (query.trim() && isAiMode) {
       const requestId = ++aiRequestId.current;
       setAiLoading(true);
-      semanticSearch(query, filters.spaceId || undefined)
+      semanticSearch(query, filters.spaceId || undefined, {
+        mode: aiSearchMode,
+      })
         .then((result) => {
           if (aiRequestId.current === requestId) setAiSearchResult(result);
         })
@@ -175,15 +187,27 @@ export function SearchSpotlight({ spaceId }: SearchSpotlightProps) {
             }}
           />
           {isAiMode && hasAiFeature && (
-            <Button
-              size="xs"
-              leftSection={<IconSparkles size={16} />}
-              onClick={handleAiSearchTrigger}
-              disabled={!query.trim()}
-              loading={isAiLoading}
-            >
-              Ask
-            </Button>
+            <>
+              <SegmentedControl
+                size="xs"
+                value={aiSearchMode}
+                onChange={(value) => setAiSearchMode(value as RagRetrievalMode)}
+                data={[
+                  { value: "hybrid", label: t("Hybrid") },
+                  { value: "semantic", label: t("Semantic") },
+                  { value: "keyword", label: t("Keyword") },
+                ]}
+              />
+              <Button
+                size="xs"
+                leftSection={<IconSparkles size={16} />}
+                onClick={handleAiSearchTrigger}
+                disabled={!query.trim()}
+                loading={isAiLoading}
+              >
+                Ask
+              </Button>
+            </>
           )}
         </Group>
 
