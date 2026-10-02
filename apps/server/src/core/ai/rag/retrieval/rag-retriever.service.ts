@@ -28,9 +28,10 @@ import {
   OVER_RETRIEVAL_CAP,
   OVER_RETRIEVAL_FACTOR,
   OVER_RETRIEVAL_FLOOR,
+  RECALL_COUNT_MAX,
   RERANK_POOL_FLOOR,
   effectiveIndexingStrategy,
-  parseRetrievalSettings,
+  mergeRetrievalOverride,
 } from './retrieval-config';
 import {
   BM25_B,
@@ -47,7 +48,12 @@ import {
 } from './fusion';
 import { applyRerankStage, buildModelPassage } from './rerank';
 
-export const RETRIEVAL_LIMIT_MAX = 50;
+/**
+ * The hard recall ceiling follows the settings contract: the effective
+ * recallCount (stored default clamped into [1, RECALL_COUNT_MAX], then any
+ * override) drives both the recall stage and the returned evidence count.
+ */
+export const RETRIEVAL_LIMIT_MAX = RECALL_COUNT_MAX;
 
 interface CandidateRow {
   chunkId: string;
@@ -134,6 +140,13 @@ export class RagRetrieverService implements RagRetriever {
         retrieval: { mode: query.mode, rerankStatus: 'not_applicable' },
       };
     }
+    // knowledgebase_search.go over-retrieval budget; numberOfKBs = 1 (see the
+    // class doc). Keyword mode over-retrieves into the same pool so the
+    // authorized-budget fill has room to skip unauthorized pages.
+    const pool = Math.min(
+      Math.max(limit * OVER_RETRIEVAL_FACTOR, OVER_RETRIEVAL_FLOOR),
+      OVER_RETRIEVAL_CAP,
+    );
     if (query.mode === 'keyword') {
       if (!strategy.keywordEnabled) return this.emptyResult(query.mode);
       const scored = await this.retrieveKeyword(
@@ -141,7 +154,7 @@ export class RagRetrieverService implements RagRetriever {
         trimmedQuery,
         query,
         profileRow.profileHash,
-        limit,
+        pool,
         limit,
       );
       return {
@@ -226,16 +239,22 @@ export class RagRetrieverService implements RagRetriever {
       fused = fuseHybrid(vector, keyword);
     }
 
-    const stored = (await this.readWorkspaceSettings(
+    const stored = await this.readWorkspaceSettings(
       actor.workspaceId,
       'retrievalSettings',
-    )) as Record<string, unknown>;
-    const settings = parseRetrievalSettings({
-      ...stored,
-      ...(query.overrides ?? {}),
-    });
+    );
+    const settings = mergeRetrievalOverride(stored, query.overrides);
 
-    if (!settings.rerankModel || !this.rerankPort || fused.length === 0) {
+    // Recall/fusion-only mode (chat pipeline): the caller performs the single
+    // final rerank at its own boundary, so this stage must not rerank twice.
+    if (query.skipRerank) {
+      return {
+        evidence: fused.slice(0, limit).map((candidate) => candidate.evidence),
+        rerankStatus: 'not_applicable',
+      };
+    }
+
+    if (!settings.rerankModel || !this.rerankPort) {
       return {
         evidence: fused.slice(0, limit).map((candidate) => candidate.evidence),
         rerankStatus: 'not_configured',
@@ -253,17 +272,20 @@ export class RagRetrieverService implements RagRetriever {
     // A failing or missing rerank model degrades to the fused order, not a
     // failed retrieval (reference NoModel outcome is recorded as a status).
     let modelScores: number[] | null = null;
+    let rerankStatus: RagRerankStatus;
     try {
-      modelScores = await this.rerankPort.rerank(
+      const result = await this.rerankPort.rerank(
         actor.workspaceId,
         settings.rerankModel,
         trimmedQuery,
         passages,
       );
+      rerankStatus = result.status === 'ok' ? 'applied' : result.status;
+      modelScores = result.status === 'ok' ? result.scores : null;
     } catch {
+      rerankStatus = 'failed';
       modelScores = null;
     }
-    const rerankStatus: RagRerankStatus = modelScores ? 'applied' : 'failed';
     const reranked = applyRerankStage({
       candidates: poolCandidates,
       modelScores,
@@ -295,15 +317,14 @@ export class RagRetrieverService implements RagRetriever {
   ): Promise<RagEvidence[]> {
     let vectorThreshold: number | null = null;
     if (pool !== null) {
-      const stored = (await this.readWorkspaceSettings(
+      const stored = await this.readWorkspaceSettings(
         actor.workspaceId,
         'retrievalSettings',
-      )) as Record<string, unknown>;
-      const settings = parseRetrievalSettings({
-        ...stored,
-        ...(query.overrides ?? {}),
-      });
-      vectorThreshold = settings.vectorThreshold;
+      );
+      vectorThreshold = mergeRetrievalOverride(
+        stored,
+        query.overrides,
+      ).vectorThreshold;
     }
 
     let profile: IndexProfile;
@@ -382,9 +403,14 @@ export class RagRetrieverService implements RagRetriever {
    * the pinned reference's ParadeDB `content ||| query` recall ordered by
    * `paradedb.score(id)` (stock deployments run postgres:18 without ParadeDB).
    * Recall matches any query lexeme (exact-token match-any, per the
-   * reference) using tsvector, orders the recall window by ts_rank as a
-   * heuristic, and scores the recalled window with BM25 over corpus
-   * statistics of the eligible corpus.
+   * reference) using tsvector, orders the recall window by exact BM25, and
+   * scores the recalled window with BM25 over corpus statistics of the
+   * eligible corpus.
+   *
+   * Authorization happens BEFORE the recall cap: candidates stream in
+   * BM25-ordered pages and the authorized budget fills up to the pool, so a
+   * restricted page can no longer push authorized BM25-best matches out of
+   * the recall window.
    *
    * The exposed keywordThreshold is NOT applied here, matching the reference
    * PostgreSQL implementation which does not apply it either (documented
@@ -411,24 +437,34 @@ export class RagRetrieverService implements RagRetriever {
       profileHash,
       terms,
     );
-    const candidates = await this.loadKeywordCandidates(
-      actor,
-      query,
-      profileHash,
-      terms,
-      pool,
-      stats,
-    );
-    const visible = await this.filterAuthorized(actor, candidates);
-    if (visible.length === 0) {
-      return [];
-    }
 
-    const evidence = visible.map((candidate) => {
-      const document = parseTsvectorText(candidate.tsvectorText);
-      const value = bm25Score(document, terms, stats);
-      return this.toEvidence(candidate, 'keyword', value);
-    });
+    // Bounded authorized-budget fill: authorize each BM25-ordered page before
+    // it can occupy budget, keep filling until the pool is met, the matching
+    // corpus is exhausted, or the bounded scan gives up (a pathological
+    // corpus where almost everything is unauthorized must not scan forever).
+    const pageSize = Math.max(1, pool);
+    const maxPages = 8;
+    const evidence: RagEvidence[] = [];
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+      const candidates = await this.loadKeywordCandidates(
+        actor,
+        query,
+        profileHash,
+        terms,
+        stats,
+        { offset: pageIndex * pageSize, pageSize },
+      );
+      if (candidates.length === 0) break;
+      const visible = await this.filterAuthorized(actor, candidates);
+      for (const candidate of visible) {
+        const document = parseTsvectorText(candidate.tsvectorText);
+        const value = bm25Score(document, terms, stats);
+        evidence.push(this.toEvidence(candidate, 'keyword', value));
+      }
+      if (evidence.length >= pool || candidates.length < pageSize) {
+        break;
+      }
+    }
     evidence.sort((left, right) => right.score.value - left.score.value);
     return evidence.slice(0, limit);
   }
@@ -456,8 +492,8 @@ export class RagRetrieverService implements RagRetriever {
     query: RagRetrieverQuery,
     profileHash: string,
     terms: string[],
-    pool: number,
     stats: Bm25CorpusStats,
+    window: { offset: number; pageSize: number },
   ): Promise<KeywordCandidateRow[]> {
     const matchAny = this.tsqueryLiteralFor(terms);
     const rows = (await this.eligibleChunks(actor, query, profileHash)
@@ -481,7 +517,8 @@ export class RagRetrieverService implements RagRetriever {
       // the recall cap: a low-rank heuristic can no longer exclude the
       // actual BM25 best candidates (mirrors bm25Score; see bm25SqlExpression).
       .orderBy(sql`${this.bm25SqlExpression(terms, stats)} desc`)
-      .limit(pool)
+      .offset(window.offset)
+      .limit(window.pageSize)
       .execute()) as unknown as KeywordCandidateRow[];
     return rows;
   }
@@ -598,6 +635,10 @@ export class RagRetrieverService implements RagRetriever {
         .where('p.workspaceId', '=', actor.workspaceId)
         .where('rg.status', '=', 'published')
         .where('rg.profileHash', '=', profileHash)
+        // The chunk must belong to the exact published generation, not merely
+        // to any generation of the source: a concurrently staged newer
+        // revision's chunks must never leak through the source-state join.
+        .whereRef('rc.generationId', '=', 'rss.publishedGenerationId')
         .where('rss.sourceStatus', '=', 'live')
         .where('p.deletedAt', 'is', null)
         // Stale revisions are excluded: the published generation must still be

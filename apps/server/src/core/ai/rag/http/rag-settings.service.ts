@@ -45,6 +45,16 @@ function toStoredIndexProfileConfig(config: IndexProfileConfig): JsonObject {
       tokenizerId: config.embedding.tokenizerId,
       maxInputTokens: config.embedding.maxInputTokens,
     },
+    // indexingStrategy must round-trip: dropping it here made keyword-only
+    // profiles read back as vector-enabled and re-enable the vector channel.
+    ...(config.indexingStrategy
+      ? {
+          indexingStrategy: {
+            vectorEnabled: config.indexingStrategy.vectorEnabled,
+            keywordEnabled: config.indexingStrategy.keywordEnabled,
+          },
+        }
+      : {}),
   };
 }
 

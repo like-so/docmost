@@ -245,25 +245,28 @@ export class RagIndexerService implements RagIndexer {
     // The indexing strategy can disable vector embeddings for this profile;
     // keyword-only indexes publish generations whose chunks have no stored
     // vectors, which semantic retrieval drops and keyword retrieval ignores.
-    const embeddingBatch =
+    const vectorless =
       (await this.readIndexingStrategy(request.key.workspaceId))
-        ?.vectorEnabled === false
-        ? {
-            profileHash: profile.profileHash,
-            dimensions: profile.embedding.dimensions,
-            vectors: [],
-          }
-        : await this.embedding.embed(
-            request.key.workspaceId,
-            profile,
-            batch.chunks.map((chunk) => ({
-              chunkId: chunk.chunkId,
-              text: chunk.text,
-            })),
-          );
+        ?.vectorEnabled === false;
+    const embeddingBatch = vectorless
+      ? {
+          profileHash: profile.profileHash,
+          dimensions: profile.embedding.dimensions,
+          vectors: [],
+        }
+      : await this.embedding.embed(
+          request.key.workspaceId,
+          profile,
+          batch.chunks.map((chunk) => ({
+            chunkId: chunk.chunkId,
+            text: chunk.text,
+          })),
+        );
 
     this.throwIfAborted(options?.signal, 'before-stage');
-    const staged = await this.generationStore.stage(batch, embeddingBatch);
+    const staged = await this.generationStore.stage(batch, embeddingBatch, {
+      vectorless: vectorless,
+    });
 
     const outcome = await this.generationStore.publishIfCurrent(
       request.key,

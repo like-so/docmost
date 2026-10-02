@@ -137,6 +137,18 @@ export class RagComposedProfileValidator implements RagProfileConfigValidator {
     ) {
       throw new RagError('EMBEDDING_NOT_CONFIGURED', 'sourcePolicy is invalid');
     }
+    if (
+      config.indexingStrategy !== undefined &&
+      (typeof config.indexingStrategy !== 'object' ||
+        config.indexingStrategy === null ||
+        typeof config.indexingStrategy.vectorEnabled !== 'boolean' ||
+        typeof config.indexingStrategy.keywordEnabled !== 'boolean')
+    ) {
+      throw new RagError(
+        'EMBEDDING_NOT_CONFIGURED',
+        'indexingStrategy must contain boolean vectorEnabled and keywordEnabled',
+      );
+    }
 
     const provider = readWorkspaceAiProvider(workspace, this.encryption);
     if (!provider) {

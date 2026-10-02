@@ -2,6 +2,7 @@ import {
   IndexProfileConfig,
   IndexingStrategy,
   RagChatRetrievalSettings,
+  RagRetrievalOverride,
   RagRetrievalSettings,
 } from '../contracts';
 import {
@@ -143,8 +144,10 @@ export function parseRetrievalSettings(stored: unknown): RagRetrievalSettings {
 }
 
 /**
- * Normalizes untrusted stored chat settings. Prompt defaults are the pinned
- * default_rewrite template; an owner-supplied blank prompt falls back to it.
+ * Normalizes untrusted stored chat settings. Chat carries ALL RetrievalConfig
+ * fields (parsed with the same clamping as the search settings) plus the
+ * rewrite/expansion extras. Prompt defaults are the pinned default_rewrite
+ * template; an owner-supplied blank prompt falls back to it.
  */
 export function parseChatRetrievalSettings(
   stored: unknown,
@@ -153,6 +156,7 @@ export function parseChatRetrievalSettings(
   const prompt = (value: unknown, fallback: string) =>
     typeof value === 'string' && value.trim() ? value : fallback;
   return {
+    ...parseRetrievalSettings(stored),
     rewriteEnabled: record.rewriteEnabled !== false,
     expansionEnabled: record.expansionEnabled !== false,
     queryUnderstandingModel:
@@ -169,6 +173,41 @@ export function parseChatRetrievalSettings(
       DEFAULT_REWRITE_USER_PROMPT,
     ),
   };
+}
+
+/**
+ * Merges per-request overrides over stored settings for a retrieval run.
+ * Plain knobs override when present. rerankModel follows the published
+ * server-resolution semantics: an omitted or null override is NOT a disable
+ * switch — it inherits the flow default (the stored explicit model, which
+ * itself may be null after normal default discovery). Only a non-blank
+ * explicit reference overrides the stored value; the server resolves that
+ * reference against the workspace's own provider configuration.
+ */
+export function mergeRetrievalOverride(
+  stored: unknown,
+  overrides?: RagRetrievalOverride | null,
+): RagRetrievalSettings {
+  const knob = overrides ?? {};
+  return parseRetrievalSettings({
+    ...storedRecord(stored),
+    ...(knob.recallCount !== undefined
+      ? { recallCount: knob.recallCount }
+      : {}),
+    ...(knob.vectorThreshold !== undefined
+      ? { vectorThreshold: knob.vectorThreshold }
+      : {}),
+    ...(knob.keywordThreshold !== undefined
+      ? { keywordThreshold: knob.keywordThreshold }
+      : {}),
+    ...(typeof knob.rerankModel === 'string' && knob.rerankModel.trim()
+      ? { rerankModel: knob.rerankModel.trim() }
+      : {}),
+    ...(knob.rerankTopK !== undefined ? { rerankTopK: knob.rerankTopK } : {}),
+    ...(knob.rerankThreshold !== undefined
+      ? { rerankThreshold: knob.rerankThreshold }
+      : {}),
+  });
 }
 
 function storedRecord(stored: unknown): Record<string, unknown> {

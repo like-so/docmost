@@ -12,17 +12,13 @@ import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB } from '@docmost/db/types/kysely.types';
 import { WorkspaceRepo } from '@docmost/db/repos/workspace/workspace.repo';
 import { AttachmentRepo } from '@docmost/db/repos/attachment/attachment.repo';
-import { User, Workspace } from '@docmost/db/types/entity.types';
+import { User, Workspace, Page } from '@docmost/db/types/entity.types';
 import { EncryptionService } from '../../integrations/encryption/encryption.service';
 import { OutboundAgentFactory } from '../../integrations/outbound/outbound-agent.factory';
 import { EnvironmentService } from '../../integrations/environment/environment.service';
 import { SearchService } from '../search/search.service';
 import { SearchResponseDto } from '../search/dto/search-response.dto';
-import {
-  ChatRetrievalOptionsDto,
-  RagRetrievalOverridesDto,
-  UpdateAiProviderDto,
-} from './dto/ai.dto';
+import { RagRetrievalOverridesDto, UpdateAiProviderDto } from './dto/ai.dto';
 import { AiIndexService } from './ai-index.service';
 import { AttachmentService } from '../attachment/services/attachment.service';
 import { AttachmentType } from '../attachment/attachment.constants';
@@ -36,6 +32,7 @@ import {
 import { RagRetrieverService } from './rag/retrieval/rag-retriever.service';
 import { RagChatRetrievalService } from './rag/retrieval/rag-chat-retrieval.service';
 import { RagError, RagEvidence, RagRetrievalMeta } from './rag/contracts';
+import { mergeRetrievalOverride } from './rag/retrieval/retrieval-config';
 import { JsonValue } from '@docmost/db/types/db';
 
 type AiProvider = {
@@ -182,8 +179,10 @@ export class AiService {
       .execute();
     return {
       ...chat,
-      messages: rows.map((row) =>
-        row.role === 'assistant' ? this.assistantMessageView(row) : row,
+      messages: await Promise.all(
+        rows.map((row) =>
+          row.role === 'assistant' ? this.assistantMessageView(user, row) : row,
+        ),
       ),
     };
   }
@@ -215,7 +214,8 @@ export class AiService {
     content: string,
     attachmentIds: string[] = [],
     requestId?: string,
-    retrieval?: ChatRetrievalOptionsDto,
+    spaceId?: string,
+    retrieval?: RagRetrievalOverridesDto,
   ) {
     this.requireChatWrite(workspace);
     this.requireGenerative(workspace);
@@ -240,12 +240,13 @@ export class AiService {
       .returning(['id', 'role', 'content', 'createdAt'])
       .executeTakeFirstOrThrow();
     const assistant = await this.complete(
+      user,
       workspace,
       chat.id,
-      user.id,
       requestId,
       this.workspaceKnowledgeOnly(workspace),
       attachmentContext,
+      spaceId,
       retrieval,
     );
     await this.db
@@ -253,7 +254,10 @@ export class AiService {
       .set({ updatedAt: new Date() })
       .where('id', '=', chat.id)
       .execute();
-    return { message, assistant: this.assistantMessageView(assistant) };
+    return {
+      message,
+      assistant: await this.assistantMessageView(user, assistant),
+    };
   }
 
   async cancel(user: User, chatId: string, requestId: string) {
@@ -279,12 +283,19 @@ export class AiService {
     // title-only queries and when RAG is unavailable or returns nothing.
     if (!titleOnly) {
       try {
+        // The effective recallCount drives the recall stage: the stored
+        // default (or any override) clamps into [1, RECALL_COUNT_MAX] inside
+        // the retriever, never the legacy fixed top-25.
+        const effective = mergeRetrievalOverride(
+          await this.readRagWorkspaceSetting(workspace.id, 'retrievalSettings'),
+          overrides,
+        );
         const result = await this.ragRetriever.retrieve(
           { userId: user.id, workspaceId: workspace.id },
           {
             query,
             mode: mode ?? 'hybrid',
-            limit: 25,
+            limit: effective.recallCount,
             ...(spaceId ? { spaceId } : {}),
             ...(overrides ? { overrides } : {}),
           },
@@ -388,13 +399,14 @@ export class AiService {
   }
 
   private async complete(
+    user: User,
     workspace: Workspace,
     chatId: string,
-    userId: string,
     requestId?: string,
     workspaceOnly = false,
     attachmentContext?: string,
-    retrieval?: ChatRetrievalOptionsDto,
+    spaceId?: string,
+    retrieval?: RagRetrievalOverridesDto,
   ) {
     const provider = this.readProvider(workspace);
     if (!provider?.apiKey)
@@ -407,13 +419,20 @@ export class AiService {
       .orderBy('createdAt', 'asc')
       .limit(40)
       .execute();
-    const rag = await this.retrieveRagContext(
+    let rag = await this.retrieveRagContext(
       workspace,
-      userId,
+      user.id,
       messages,
       Boolean(attachmentContext),
+      spaceId,
       retrieval,
     );
+    if (rag) {
+      // The rerank stage is asynchronous: current page/space authorization,
+      // deletion and publication freshness are rechecked here, after the
+      // rerank and BEFORE any subsequent model stage or persisted output.
+      rag = await this.revalidateRagEvidence(user, workspace, rag);
+    }
     const ragContext = rag?.context ?? null;
     const url = this.chatUrl(provider);
     const key = requestId
@@ -462,7 +481,7 @@ export class AiService {
         const assistantMetadata: JsonValue = rag
           ? ({
               retrieval: rag.retrieval,
-              sources: await this.hydrateCitationSources(rag.evidence),
+              sources: await this.hydrateCitationSources(user, rag.evidence),
             } as unknown as JsonValue)
           : null;
         return this.db
@@ -637,18 +656,22 @@ export class AiService {
 
   /**
    * Hybrid RAG retrieval for chat (docmost-rag-v1 contract 12): rewrite,
-   * retrieval, expansion and rerank happen inside RagChatRetrievalService;
-   * every returned chunk was rechecked for authorization at the retrieval
-   * boundary. Any failure yields null so chat works unchanged without RAG.
+   * recall/fusion, expansion and the single final rerank happen inside
+   * RagChatRetrievalService; every returned chunk was rechecked for
+   * authorization at the retrieval boundary. Any failure yields null so chat
+   * works unchanged without RAG. Retrieval metadata is preserved even when
+   * the evidence list is empty (rerankStatus not_applicable), so clients see
+   * the executed flow independently of result presence.
    */
   private async retrieveRagContext(
     workspace: Workspace,
     userId: string,
     messages: Array<{ role: string; content: string | null }>,
     hasAttachments: boolean,
-    retrieval?: ChatRetrievalOptionsDto,
+    spaceId?: string,
+    overrides?: RagRetrievalOverridesDto,
   ): Promise<{
-    context: string;
+    context: string | null;
     evidence: RagEvidence[];
     retrieval: RagRetrievalMeta;
   } | null> {
@@ -668,23 +691,12 @@ export class AiService {
               content: message.content,
             })),
           attachmentFileNames: hasAttachments ? ['(attached documents)'] : [],
-          ...(retrieval?.mode ? { mode: retrieval.mode } : {}),
-          ...(retrieval?.spaceId ? { spaceId: retrieval.spaceId } : {}),
-          ...(retrieval?.pageIds?.length ? { pageIds: retrieval.pageIds } : {}),
-          ...(retrieval?.overrides ? { overrides: retrieval.overrides } : {}),
+          ...(spaceId ? { spaceId } : {}),
+          ...(overrides ? { overrides } : {}),
         },
       );
-      if (output.evidence.length === 0) return null;
-      const context = output.evidence
-        .map((evidence, index) => {
-          const heading = evidence.locator?.headingPath?.length
-            ? `, ${evidence.locator.headingPath.join(' > ')}`
-            : '';
-          return `[${index + 1}] (page ${evidence.key.pageId}${heading})\n${evidence.text}`;
-        })
-        .join('\n\n');
       return {
-        context,
+        context: buildRagContext(output.evidence),
         evidence: output.evidence,
         retrieval: output.retrieval,
       };
@@ -694,12 +706,94 @@ export class AiService {
   }
 
   /**
+   * Post-rerank, pre-model revalidation of the chat evidence: every chunk
+   * must still come from a live, currently published source whose published
+   * generation still matches the evidence revision and the workspace's
+   * enabled profile, and the requesting user must still hold current view
+   * access to the page. Failing chunks are dropped; the context is rebuilt
+   * from the survivors so the model stage and the persisted citations never
+   * see stale or unauthorized material.
+   */
+  private async revalidateRagEvidence(
+    user: User,
+    workspace: Workspace,
+    rag: {
+      context: string | null;
+      evidence: RagEvidence[];
+      retrieval: RagRetrievalMeta;
+    },
+  ): Promise<{
+    context: string | null;
+    evidence: RagEvidence[];
+    retrieval: RagRetrievalMeta;
+  }> {
+    if (rag.evidence.length === 0) {
+      return { ...rag, context: null };
+    }
+    const pageIds = [...new Set(rag.evidence.map((item) => item.key.pageId))];
+    const freshness = await this.db
+      .selectFrom('ragSourceState as rss')
+      .innerJoin('ragGenerations as rg', 'rg.id', 'rss.publishedGenerationId')
+      .innerJoin(
+        'ragWorkspaceProfile as rwp',
+        'rwp.workspaceId',
+        'rss.workspaceId',
+      )
+      .where('rss.workspaceId', '=', workspace.id)
+      .where('rss.pageId', 'in', pageIds)
+      .where('rwp.enabled', '=', true)
+      .whereRef('rg.profileHash', '=', 'rwp.profileHash')
+      .where('rg.status', '=', 'published')
+      .where('rss.sourceStatus', '=', 'live')
+      .whereRef('rss.publishedInputRevision', '=', 'rss.desiredInputRevision')
+      .select(['rss.pageId as pageId', 'rg.inputRevision as inputRevision'])
+      .execute();
+    const fresh = new Map(
+      freshness.map((row) => [
+        row.pageId as string,
+        row.inputRevision as string,
+      ]),
+    );
+
+    const pageRows = await this.db
+      .selectFrom('pages')
+      .select(['pages.id', 'pages.spaceId'])
+      .where('pages.id', 'in', pageIds)
+      .where('pages.deletedAt', 'is', null)
+      .execute();
+    const viewable = new Set<string>();
+    for (const page of pageRows) {
+      try {
+        await this.pageAccessService.validateCanView(page as Page, user);
+        viewable.add(page.id);
+      } catch {
+        // Authorization failure drops the page, never the whole chat.
+      }
+    }
+
+    const evidence = rag.evidence.filter(
+      (item) =>
+        viewable.has(item.key.pageId) &&
+        fresh.get(item.key.pageId) === item.inputRevision,
+    );
+    return {
+      evidence,
+      context: buildRagContext(evidence),
+      retrieval: rag.retrieval,
+    };
+  }
+
+  /**
    * Persisted citation sources for the assistant message: one entry per
    * evidence chunk, hydrated with the page title and canonical page URL.
-   * Evidence pageIds are authorized at the retrieval boundary; pages
-   * deleted since are skipped.
+   * Authorization is rechecked HERE at emission time, against the requesting
+   * user: pages deleted since, or the user lost access to, are dropped
+   * instead of persisted as citations.
    */
-  private async hydrateCitationSources(evidence: RagEvidence[]): Promise<
+  private async hydrateCitationSources(
+    user: User,
+    evidence: RagEvidence[],
+  ): Promise<
     Array<{
       citationId: string;
       pageId: string;
@@ -716,14 +810,26 @@ export class AiService {
         'pages.id',
         'pages.slugId',
         'pages.title',
+        'pages.spaceId',
         this.pageRepo.withSpace(eb),
       ])
       .where('pages.id', 'in', pageIds)
       .where('pages.deletedAt', 'is', null)
       .execute();
-    const byId = new Map(rows.map((row) => [row.id, row]));
+    const authorized = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) {
+      try {
+        await this.pageAccessService.validateCanView(
+          { id: row.id, spaceId: row.spaceId } as Page,
+          user,
+        );
+        authorized.set(row.id, row);
+      } catch {
+        // Unauthorized pages produce no citation source.
+      }
+    }
     return evidence.flatMap((item, index) => {
-      const page = byId.get(item.key.pageId);
+      const page = authorized.get(item.key.pageId);
       if (!page) return [];
       return [
         {
@@ -739,15 +845,21 @@ export class AiService {
 
   /**
    * The assistant message view: the retrieval metadata and citation sources
-   * stored in the message metadata are projected to top-level fields.
+   * stored in the message metadata are projected to top-level fields. Stored
+   * sources are RE-AUTHORIZED against the requesting user at reload time: a
+   * page deleted or restricted since the message was written is dropped from
+   * the view, while the retrieval metadata stays intact.
    */
-  private assistantMessageView(row: {
-    id: string;
-    role: string;
-    content: string | null;
-    metadata: unknown;
-    createdAt: Date;
-  }) {
+  private async assistantMessageView(
+    user: User,
+    row: {
+      id: string;
+      role: string;
+      content: string | null;
+      metadata: unknown;
+      createdAt: Date;
+    },
+  ) {
     const meta = (row.metadata ?? null) as {
       retrieval?: RagRetrievalMeta;
       sources?: Array<{
@@ -758,14 +870,62 @@ export class AiService {
         locator: unknown;
       }>;
     } | null;
+    const sources = meta?.sources?.length
+      ? await this.filterStoredSources(user, meta.sources)
+      : undefined;
     return {
       id: row.id,
       role: row.role,
       content: row.content,
       createdAt: row.createdAt,
       ...(meta?.retrieval ? { retrieval: meta.retrieval } : {}),
-      ...(meta?.sources ? { sources: meta.sources } : {}),
+      ...(sources ? { sources } : {}),
     };
+  }
+
+  /** Reload-time recheck of stored citation sources for the requesting user. */
+  private async filterStoredSources<
+    T extends {
+      citationId: string;
+      pageId: string;
+      title: string | null;
+      url: string;
+      locator: unknown;
+    },
+  >(user: User, sources: T[]): Promise<T[]> {
+    const pageIds = [...new Set(sources.map((source) => source.pageId))];
+    const rows = await this.db
+      .selectFrom('pages')
+      .select(['pages.id', 'pages.spaceId'])
+      .where('pages.id', 'in', pageIds)
+      .where('pages.deletedAt', 'is', null)
+      .execute();
+    const viewable = new Set<string>();
+    for (const page of rows) {
+      try {
+        await this.pageAccessService.validateCanView(page as Page, user);
+        viewable.add(page.id);
+      } catch {
+        // Authorization failure drops the stored citation.
+      }
+    }
+    return sources.filter((source) => viewable.has(source.pageId));
+  }
+
+  /** Reads one entry from the owner-controlled `rag` workspace settings. */
+  private async readRagWorkspaceSetting(
+    workspaceId: string,
+    key: 'retrievalSettings',
+  ): Promise<unknown> {
+    const row = await this.db
+      .selectFrom('workspaces')
+      .select('settings')
+      .where('id', '=', workspaceId)
+      .executeTakeFirst();
+    const rag = (row?.settings as Record<string, unknown> | null)?.['rag'] as
+      | Record<string, unknown>
+      | undefined;
+    return rag?.[key];
   }
 
   private attachmentContext(
@@ -863,4 +1023,17 @@ export class AiService {
     )
       throw new ForbiddenException('AI search is disabled');
   }
+}
+
+/** Renders authorized evidence into the numbered workspace context block. */
+function buildRagContext(evidence: RagEvidence[]): string | null {
+  if (evidence.length === 0) return null;
+  return evidence
+    .map((item, index) => {
+      const heading = item.locator?.headingPath?.length
+        ? `, ${item.locator.headingPath.join(' > ')}`
+        : '';
+      return `[${index + 1}] (page ${item.key.pageId}${heading})\n${item.text}`;
+    })
+    .join('\n\n');
 }

@@ -19,7 +19,7 @@ import {
   seedSpaceMember,
   seedUser,
 } from './rag-test-support';
-import { IndexProfile, RagEvidence } from '../contracts';
+import { IndexProfile, RagEvidence, RagRerankResult } from '../contracts';
 
 const PROFILE_HASH = 'profile-a';
 
@@ -54,13 +54,14 @@ interface TestContext {
 
 /**
  * Fixture rerank port: records the passages it received and derives the
- * model scores from a test-supplied function (null simulates an unavailable
- * model).
+ * model scores from a test-supplied function (a null simulates an
+ * unavailable model, reported as not_configured per the port contract).
  */
 class FixtureRerankPort {
   calls = 0;
   receivedQueries: string[] = [];
   receivedPassages: string[][] = [];
+  receivedModels: string[] = [];
   constructor(
     private readonly scoreFor: (
       query: string,
@@ -70,14 +71,16 @@ class FixtureRerankPort {
 
   async rerank(
     _workspaceId: string,
-    _model: string,
+    model: string,
     query: string,
     passages: string[],
-  ): Promise<number[] | null> {
+  ): Promise<RagRerankResult> {
     this.calls += 1;
+    this.receivedModels.push(model);
     this.receivedQueries.push(query);
     this.receivedPassages.push(passages);
-    return this.scoreFor(query, passages);
+    const scores = this.scoreFor(query, passages);
+    return scores ? { status: 'ok', scores } : { status: 'not_configured' };
   }
 }
 
@@ -701,10 +704,10 @@ jest.setTimeout(30000);
           'keyword',
         ]);
         // The model is configured but reports unavailable: the fused order
-        // stands and the status records the failed stage.
+        // stands and the status records the not_configured port outcome.
         expect(result.retrieval).toEqual({
           mode: 'hybrid',
-          rerankStatus: 'failed',
+          rerankStatus: 'not_configured',
         });
       },
       {},
@@ -797,6 +800,177 @@ jest.setTimeout(30000);
         expect(keyword.evidence).toHaveLength(0);
       },
       { alpha: [1, 0] },
+    );
+  });
+
+  it('never serves chunks from a staged generation of the same source', async () => {
+    await setup(async (ctx) => {
+      const { pageId } = await createPage(ctx, { member: true });
+      const publishedGenerationId = await publishPage(ctx, pageId, [
+        { text: 'published text', embedding: null },
+      ]);
+
+      // A concurrently staged newer revision: its chunks share page,
+      // workspace and profile hash with the published generation and would
+      // leak through a source-state-only join.
+      const stagedGenerationId = randomUUID();
+      await ctx.db
+        .insertInto('ragGenerations')
+        .values({
+          id: stagedGenerationId,
+          workspaceId: ctx.workspaceId,
+          pageId,
+          inputRevision: '9',
+          profileHash: PROFILE_HASH,
+          status: 'staged',
+        })
+        .execute();
+      await ctx.db
+        .insertInto('ragChunks')
+        .values({
+          id: randomUUID(),
+          generationId: stagedGenerationId,
+          workspaceId: ctx.workspaceId,
+          pageId,
+          ordinal: 0,
+          text: 'staged secret text',
+          tokenCount: 8,
+          textHash: 'hash-staged',
+          locator: {
+            pageId,
+            headingPath: [],
+            start: 0,
+            end: 17,
+            offsetUnit: 'utf16',
+            textHash: 'hash-staged',
+          },
+          embedding: null,
+          embeddingDimensions: null,
+        })
+        .execute();
+
+      const evidence = await retrieve(ctx, 'keyword', {
+        query: 'staged secret published text',
+      });
+      expect(evidence.map((item) => item.text)).toEqual(['published text']);
+      expect(evidence[0].inputRevision).toBe('1');
+      expect(publishedGenerationId).toBeTruthy();
+    });
+  });
+
+  it('fills the keyword recall budget with authorized candidates after restricted pages', async () => {
+    await setup(async (ctx) => {
+      // 60 short alpha-dense chunks on a page restricted against the actor:
+      // any single BM25-ordered window of 50 rows contains only restricted
+      // candidates, so an authorize-after-cap pipeline would return nothing.
+      const restrictedPage = await createPage(ctx, { member: true });
+      const chunks = Array.from({ length: 60 }, (_, index) => ({
+        text: `alpha alpha filler ${index}`,
+        embedding: null,
+      }));
+      await publishPage(ctx, restrictedPage.pageId, chunks);
+      const pageAccessId = await seedPageRestriction(ctx.db, {
+        id: restrictedPage.pageId,
+        workspaceId: ctx.workspaceId,
+        spaceId: restrictedPage.spaceId,
+      });
+
+      const memberPage = await createPage(ctx, { member: true });
+      // tf=1 in a long document: the lowest BM25 score of the whole matching
+      // corpus, so the member candidate sits behind every restricted row.
+      await publishPage(ctx, memberPage.pageId, [
+        {
+          text: `alpha ${'padding token '.repeat(60)}`,
+          embedding: null,
+        },
+      ]);
+
+      const evidence = await retrieve(ctx, 'keyword', {
+        query: 'alpha',
+        limit: 1,
+      });
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0].key.pageId).toBe(memberPage.pageId);
+      expect(pageAccessId).toBeTruthy();
+    });
+  });
+
+  it('skips the rerank stage entirely in skipRerank mode', async () => {
+    const rerankPort = new FixtureRerankPort((_query, passages) =>
+      passages.map(() => 0.9),
+    );
+    await setup(
+      async (ctx) => {
+        const { pageId } = await createPage(ctx, { member: true });
+        await publishPage(ctx, pageId, [
+          { text: 'alpha beta gamma', embedding: null },
+          { text: 'alpha delta', embedding: null },
+        ]);
+        await setWorkspaceSettings(ctx, {
+          rag: {
+            retrievalSettings: {
+              rerankModel: 'rerank-model',
+              rerankTopK: 2,
+            },
+          },
+        });
+
+        const result = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'hybrid', limit: 10, skipRerank: true },
+        );
+        expect(rerankPort.calls).toBe(0);
+        expect(result.evidence.map((item) => item.text)).toEqual([
+          'alpha delta',
+          'alpha beta gamma',
+        ]);
+        expect(result.retrieval).toEqual({
+          mode: 'hybrid',
+          rerankStatus: 'not_applicable',
+        });
+      },
+      {},
+      rerankPort,
+    );
+  });
+
+  it('activates rerank through a non-blank rerankModel override', async () => {
+    const rerankPort = new FixtureRerankPort((_query, passages) =>
+      passages.map(() => 0.9),
+    );
+    await setup(
+      async (ctx) => {
+        const { pageId } = await createPage(ctx, { member: true });
+        await publishPage(ctx, pageId, [
+          { text: 'alpha beta gamma', embedding: null },
+          { text: 'alpha delta', embedding: null },
+        ]);
+
+        // No stored rerank model: without the override the fused order stands
+        // and the port is never consulted.
+        const plain = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'hybrid', limit: 10 },
+        );
+        expect(rerankPort.calls).toBe(0);
+        expect(plain.retrieval.rerankStatus).toBe('not_configured');
+
+        // A non-blank override selects the model server-side and reranks.
+        const overridden = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          {
+            query: 'alpha',
+            mode: 'hybrid',
+            limit: 10,
+            overrides: { rerankModel: 'override-model' },
+          },
+        );
+        expect(rerankPort.calls).toBe(1);
+        expect(rerankPort.receivedModels).toEqual(['override-model']);
+        expect(overridden.retrieval.rerankStatus).toBe('applied');
+      },
+      {},
+      rerankPort,
     );
   });
 });

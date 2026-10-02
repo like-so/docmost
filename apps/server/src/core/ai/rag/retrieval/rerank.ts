@@ -21,8 +21,9 @@ import {
  * Outcomes: model scores unavailable (null) or malformed preserve retrieval
  * order unchanged; threshold filtering degrades once when the threshold sits
  * above the degrade floor; when nothing passes, the top-1 fallback keeps the
- * best candidate if it reaches the fallback minimum score (0 for an
- * explicitly scoped search so a global threshold cannot erase the scope).
+ * best candidate if it reaches the fallback minimum score (-Inf for an
+ * explicitly scoped search, per rerank.go, so a global threshold can never
+ * erase the requested scope).
  */
 
 export type RerankOutcome =
@@ -73,7 +74,12 @@ export function applyRerankStage(input: RerankStageInput): RerankStageResult {
     candidate,
     modelScore: input.modelScores![index],
   }));
-  const fallbackMinScore = input.explicitScope ? 0 : RERANK_FALLBACK_MIN_SCORE;
+  // rerank.go: an explicitly scoped search pins FallbackMinScore to -Inf so
+  // the top-1 fallback can never erase the requested scope; the unscoped
+  // default keeps the 0.15 floor.
+  const fallbackMinScore = input.explicitScope
+    ? Number.NEGATIVE_INFINITY
+    : RERANK_FALLBACK_MIN_SCORE;
   const { passing, outcome, effectiveThreshold } = applyThreshold(
     scored,
     input.threshold,
@@ -89,6 +95,11 @@ export function applyRerankStage(input: RerankStageInput): RerankStageResult {
     Math.min(Math.max(1, Math.trunc(input.topK)), passing.length),
     MMR_LAMBDA,
     (entry) => buildModelPassage(entry.candidate),
+    // mmr.go selects over the COMPOSITE score. Feeding the pre-rerank
+    // retrieval score here let a retrieval-best candidate with a weak model
+    // score outrank the composite best (review counterexample: retrieval
+    // 1/0.1 with model 0.2/1 has composite 0.52/0.73 yet picked the first).
+    (entry) => compositeOf(entry),
   );
   return {
     evidence: picks.map((index) => {
@@ -163,8 +174,10 @@ export function buildModelPassage(evidence: RagEvidence): string {
 }
 
 /**
- * mmr.go SelectMMR: incremental MMR over composite score and token-set
- * Jaccard redundancy; ties go to the earlier entry.
+ * mmr.go SelectMMR: incremental MMR over the supplied relevance score and
+ * token-set Jaccard redundancy; ties go to the earlier entry. The relevance
+ * accessor is explicit so callers cannot accidentally feed a pre-rerank
+ * retrieval score where the reference uses the composite score.
  */
 export function selectMmr<T>(
   entries: T[],
@@ -174,6 +187,12 @@ export function selectMmr<T>(
     entry instanceof Object && 'text' in (entry as object)
       ? String((entry as { text: unknown }).text)
       : '',
+  relevanceOf: (entry: T) => number = (entry) =>
+    entry instanceof Object &&
+    'score' in (entry as object) &&
+    typeof (entry as { score: unknown }).score === 'number'
+      ? (entry as { score: number }).score
+      : 0,
 ): number[] {
   if (k <= 0 || entries.length === 0) return [];
   const tokenSets = entries.map((entry) => tokenizeSimple(passageOf(entry)));
@@ -185,7 +204,7 @@ export function selectMmr<T>(
     let bestScore = Number.NEGATIVE_INFINITY;
     for (const [pos, index] of remaining.entries()) {
       const mmr =
-        lambda * mmrRelevance(entries[index]) -
+        lambda * relevanceOf(entries[index]) -
         (1 - lambda) * maxRedundancy[index];
       if (mmr > bestScore) {
         bestScore = mmr;
@@ -203,24 +222,6 @@ export function selectMmr<T>(
     }
   }
   return selected;
-}
-
-/**
- * MMR relevance input. The reference selects over the composite score; the
- * stage callers map entries to { score } before calling selectMmr, so the
- * default reads a `score` field when present.
- */
-function mmrRelevance(entry: unknown): number {
-  if (typeof entry === 'object' && entry !== null) {
-    if ('score' in entry) {
-      const value = (entry as { score: unknown }).score;
-      if (typeof value === 'number' && Number.isFinite(value)) return value;
-    }
-    const nested = (entry as { candidate?: { score?: { value?: unknown } } })
-      .candidate?.score?.value;
-    if (typeof nested === 'number' && Number.isFinite(nested)) return nested;
-  }
-  return 0;
 }
 
 /** searchutil.TokenizeSimple equivalent: lowercase letter/digit runs. */

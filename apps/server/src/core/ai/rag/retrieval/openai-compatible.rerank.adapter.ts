@@ -5,7 +5,7 @@ import { request } from 'undici';
 import { EncryptionService } from '../../../../integrations/encryption/encryption.service';
 import { OutboundAgentFactory } from '../../../../integrations/outbound/outbound-agent.factory';
 import { EnvironmentService } from '../../../../integrations/environment/environment.service';
-import { RagRerankPort } from '../contracts';
+import { RagRerankPort, RagRerankResult } from '../contracts';
 import {
   readWorkspaceAiProvider,
   WorkspaceAiProvider,
@@ -18,10 +18,13 @@ import {
  * from the owner-controlled retrieval settings and the workspace's existing
  * provider credentials (no separate rerank provider configuration).
  *
- * Any failure to reach or parse the endpoint yields null: callers preserve
- * retrieval order (reference NoModel outcome), so a broken reranker degrades
- * ranking quality but never blocks retrieval. Credential values never appear
- * in logs or errors.
+ * Outcomes are reported, not guessed: a missing provider/key is
+ * `not_configured`, while a reached endpoint that fails, returns malformed
+ * data, or does not cover every passage exactly once with a finite score is
+ * `failed`. Zero-filling missing scores is forbidden: a partially covered
+ * response must degrade to retrieval order with `failed` metadata, never
+ * invent low relevance scores. Callers preserve retrieval order for both
+ * non-ok outcomes. Credential values never appear in logs or errors.
  */
 @Injectable()
 export class OpenAiCompatibleRerankAdapter implements RagRerankPort {
@@ -37,10 +40,10 @@ export class OpenAiCompatibleRerankAdapter implements RagRerankPort {
     model: string,
     query: string,
     passages: string[],
-  ): Promise<number[] | null> {
-    if (passages.length === 0) return null;
+  ): Promise<RagRerankResult> {
+    if (passages.length === 0) return { status: 'failed' };
     const provider = await this.readProvider(workspaceId);
-    if (!provider?.apiKey) return null;
+    if (!provider?.apiKey) return { status: 'not_configured' };
 
     const url = new URL('/v1/rerank', provider.baseUrl).toString();
     try {
@@ -62,14 +65,14 @@ export class OpenAiCompatibleRerankAdapter implements RagRerankPort {
           }),
         });
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          return null;
+          return { status: 'failed' };
         }
         const result = (await response.body.json()) as {
           results?: Array<{ index?: unknown; relevance_score?: unknown }>;
         };
         const results = result.results;
-        if (!Array.isArray(results)) return null;
-        const scores = new Array<number>(passages.length).fill(0);
+        if (!Array.isArray(results)) return { status: 'failed' };
+        const scores = new Array<number>(passages.length);
         for (const entry of results) {
           const index = entry?.index;
           const score = entry?.relevance_score;
@@ -81,16 +84,22 @@ export class OpenAiCompatibleRerankAdapter implements RagRerankPort {
             typeof score !== 'number' ||
             !Number.isFinite(score)
           ) {
-            continue;
+            return { status: 'failed' };
+          }
+          if (scores[index] !== undefined) {
+            return { status: 'failed' };
           }
           scores[index] = score;
         }
-        return scores;
+        if (scores.some((score) => score === undefined)) {
+          return { status: 'failed' };
+        }
+        return { status: 'ok', scores };
       } finally {
         await lease.release();
       }
     } catch {
-      return null;
+      return { status: 'failed' };
     }
   }
 

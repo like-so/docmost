@@ -18,8 +18,9 @@ import {
   EXPANSION_TOP_K_MULTIPLIER,
   REWRITE_MAX_TOKENS,
   REWRITE_TEMPERATURE,
+  RERANK_POOL_FLOOR,
+  mergeRetrievalOverride,
   parseChatRetrievalSettings,
-  parseRetrievalSettings,
 } from './retrieval-config';
 import { buildExpansionVariants, parseRewriteOutput } from './query-rewrite';
 import { applyRerankStage, buildModelPassage } from './rerank';
@@ -47,9 +48,7 @@ export interface RagChatRetrievalInput {
   history?: RagChatHistoryTurn[];
   attachmentFileNames?: string[];
   spaceId?: string;
-  pageIds?: string[];
-  mode?: RagRetrievalMode;
-  overrides?: Omit<RagRetrievalOverride, 'rerankModel'>;
+  overrides?: RagRetrievalOverride;
 }
 
 export interface RagChatRetrievalOutput {
@@ -64,14 +63,20 @@ export interface RagChatRetrievalOutput {
  * Chat query-understanding and hybrid retrieval (docmost-rag-v1 contract 12,
  * ported from Tencent/WeKnora bccb4b1 chat pipeline): optional model rewrite
  * of the query with conversation history (failure falls back to the original
- * query), hybrid retrieval, local query expansion when the initial recall
- * falls short of the configured recall count, and the optional rerank stage.
+ * query), hybrid recall/fusion, local query expansion when the initial recall
+ * falls short of the configured recall count, and exactly ONE final rerank
+ * stage at this boundary. The retriever runs in skipRerank mode so the chat
+ * rerank cannot double-apply, and chat reads the independent chat defaults
+ * (all RetrievalConfig fields) merged with the per-request overrides, never
+ * the search defaults.
  *
  * Authorization: every chunk returned here passed the retriever's
  * recheck-at-return boundary (space membership plus page-level restrictions,
  * rechecked immediately before evidence leaves RagRetrieverService). The
  * rewrite and rerank stages transform already-authorized evidence in memory
- * and issue no new fetches, so no second authorization gap exists.
+ * and issue no new fetches, so no second authorization gap exists here; the
+ * chat caller rechecks current authorization again before model stages and
+ * final output.
  */
 @Injectable()
 export class RagChatRetrievalService {
@@ -91,12 +96,12 @@ export class RagChatRetrievalService {
     input: RagChatRetrievalInput,
   ): Promise<RagChatRetrievalOutput> {
     const stored = await this.readStoredSettings(actor.workspaceId);
-    const retrieval = parseRetrievalSettings({
-      ...(stored.retrievalSettings as Record<string, unknown> | undefined),
-      ...(input.overrides ?? {}),
-    });
     const chat = parseChatRetrievalSettings(stored.chatRetrievalSettings);
-    const mode: RagRetrievalMode = input.mode ?? 'hybrid';
+    const retrieval = mergeRetrievalOverride(
+      stored.chatRetrievalSettings,
+      input.overrides,
+    );
+    const mode: RagRetrievalMode = 'hybrid';
 
     const rewrite = chat.rewriteEnabled
       ? await this.rewriteQuery(actor.workspaceId, chat, input)
@@ -118,8 +123,8 @@ export class RagChatRetrievalService {
         mode,
         limit: retrieval.recallCount,
         ...(input.spaceId ? { spaceId: input.spaceId } : {}),
-        ...(input.pageIds?.length ? { pageIds: input.pageIds } : {}),
         ...(input.overrides ? { overrides: input.overrides } : {}),
+        skipRerank: true,
       })
       .then((result) => result.evidence);
 
@@ -143,7 +148,6 @@ export class RagChatRetrievalService {
             mode: 'keyword',
             limit: expTopK,
             ...(input.spaceId ? { spaceId: input.spaceId } : {}),
-            ...(input.pageIds?.length ? { pageIds: input.pageIds } : {}),
           });
           evidence = mergeByChunk(evidence, variantResult.evidence);
         } catch {
@@ -173,38 +177,46 @@ export class RagChatRetrievalService {
     evidence: RagEvidence[],
     retrieval: RagRetrievalSettings,
   ): Promise<{ evidence: RagEvidence[]; rerankStatus: RagRerankStatus }> {
-    if (!retrieval.rerankModel || !this.rerankPort || evidence.length === 0) {
+    if (evidence.length === 0) {
+      return { evidence: [], rerankStatus: 'not_applicable' };
+    }
+    if (!retrieval.rerankModel || !this.rerankPort) {
       return {
         evidence: evidence.slice(0, retrieval.recallCount),
-        rerankStatus:
-          evidence.length === 0 ? 'not_applicable' : 'not_configured',
+        rerankStatus: 'not_configured',
       };
     }
     const byScore = [...evidence].sort(
       (left, right) => right.score.value - left.score.value,
     );
-    const pool = byScore.slice(0, Math.max(retrieval.rerankTopK, 50));
+    const pool = byScore.slice(
+      0,
+      Math.max(retrieval.rerankTopK, RERANK_POOL_FLOOR),
+    );
     const passages = pool.map((item) => buildModelPassage(item));
     // A failing or missing rerank model degrades to the retrieval order,
     // not a failed chat (the status records the outcome).
     let modelScores: number[] | null = null;
+    let rerankStatus: RagRerankStatus;
     try {
-      modelScores = await this.rerankPort.rerank(
+      const result = await this.rerankPort.rerank(
         workspaceId,
         retrieval.rerankModel,
         input.query.trim(),
         passages,
       );
+      rerankStatus = result.status === 'ok' ? 'applied' : result.status;
+      modelScores = result.status === 'ok' ? result.scores : null;
     } catch {
+      rerankStatus = 'failed';
       modelScores = null;
     }
-    const rerankStatus: RagRerankStatus = modelScores ? 'applied' : 'failed';
     const stage = applyRerankStage({
       candidates: pool,
       modelScores,
       threshold: retrieval.rerankThreshold,
       topK: retrieval.rerankTopK,
-      explicitScope: Boolean(input.spaceId || input.pageIds?.length),
+      explicitScope: Boolean(input.spaceId),
     });
     return { evidence: stage.evidence, rerankStatus };
   }

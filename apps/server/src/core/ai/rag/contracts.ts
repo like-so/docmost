@@ -260,16 +260,24 @@ export interface RagRetrieverQuery {
   limit: number;
   /**
    * Per-request retrieval knobs merged over the stored settings before
-   * parsing. rerankModel is intentionally excluded: the model is resolved
-   * server-side only.
+   * parsing. rerankModel is an optional nullable workspace-authorized model
+   * reference: omission or null inherits the flow default, and the server
+   * resolves the model against its own provider configuration.
    */
-  overrides?: Omit<RagRetrievalOverride, 'rerankModel'>;
+  overrides?: RagRetrievalOverride;
+  /**
+   * Recall/fusion-only mode: skips the final rerank stage inside the
+   * retriever. The chat pipeline uses this so expansion and the single final
+   * rerank happen once, at the chat boundary.
+   */
+  skipRerank?: boolean;
 }
 
 /**
  * Per-request overrides of the retrieval knobs. Absent fields keep the
  * stored (or default) values; the merged payload passes through the same
- * normalization as the stored settings.
+ * normalization as the stored settings. rerankModel null is NOT a disable
+ * switch: it resolves through the same flow-default discovery as omission.
  */
 export interface RagRetrievalOverride {
   recallCount?: number;
@@ -371,9 +379,16 @@ export interface StageResult {
 }
 
 export interface GenerationStore {
+  /**
+   * Stages a chunk batch with its aligned embedding batch. `vectorless`
+   * marks a keyword-only indexing strategy: the store then requires an empty
+   * embedding batch and publishes chunks without vectors. Without it, the
+   * strict one-vector-per-chunk pairing checks apply unchanged.
+   */
   stage(
     batch: ChunkBatch,
     embeddingBatch: EmbeddingBatchResult,
+    options?: { vectorless?: boolean },
   ): Promise<StageResult>;
   publishIfCurrent(
     key: DocumentKey,
@@ -413,12 +428,16 @@ export interface RagRetrievalSettings {
 
 /**
  * Chat query-understanding defaults (owner-controlled, stored outside the
- * index profile). Defaults follow the pinned reference conversation config:
- * rewrite and expansion enabled, the default_rewrite template, temperature
- * 0.3 and a 150-token completion budget. queryUnderstandingModel null falls
- * back to the workspace provider chat model.
+ * index profile). Chat carries ALL independent RetrievalConfig fields in
+ * addition to the rewrite/expansion extras, so chat recall and rerank read
+ * the chat defaults, never the search defaults. Retrieval defaults follow
+ * the pinned reference (WeKnora bccb4b1); prompt/model defaults follow the
+ * pinned reference conversation config: rewrite and expansion enabled, the
+ * default_rewrite template, temperature 0.3 and a 150-token completion
+ * budget. queryUnderstandingModel null falls back to the workspace provider
+ * chat model.
  */
-export interface RagChatRetrievalSettings {
+export interface RagChatRetrievalSettings extends RagRetrievalSettings {
   rewriteEnabled: boolean;
   expansionEnabled: boolean;
   queryUnderstandingModel: string | null;
@@ -432,10 +451,22 @@ export interface RagRetrievalSettingsView {
 }
 
 /**
+ * Rerank stage outcome. `ok` carries model relevance scores in [0, 1]
+ * aligned with the passages. `not_configured` means no usable model/provider
+ * is configured for the workspace; `failed` means a configured model call
+ * did not return usable scores. Callers preserve retrieval order for both
+ * non-ok outcomes and record the distinction in retrieval metadata.
+ */
+export type RagRerankResult =
+  | { status: 'ok'; scores: number[] }
+  | { status: 'not_configured' }
+  | { status: 'failed' };
+
+/**
  * Rerank port. Implementations send no unauthorized text: callers pass only
- * actor-authorized evidence. A null result means the model is missing or
- * unavailable; callers preserve retrieval order in that case. The score
- * values are model relevance scores in [0, 1] aligned with the passages.
+ * actor-authorized evidence. The score values are model relevance scores
+ * aligned with the passages; implementations must validate complete finite
+ * score coverage before reporting `ok`.
  */
 export interface RagRerankPort {
   rerank(
@@ -443,7 +474,7 @@ export interface RagRerankPort {
     model: string,
     query: string,
     passages: string[],
-  ): Promise<number[] | null>;
+  ): Promise<RagRerankResult>;
 }
 
 export const RAG_SOURCE_LEDGER = Symbol('RAG_SOURCE_LEDGER');

@@ -11,6 +11,15 @@ const workspace = {
 } as any;
 const user = { id: 'user', workspaceId: 'ws' } as any;
 
+/** Mocks the workspace `rag` settings probe behind semanticSearch. */
+function mockSettingsProbe(instance: any, stored: unknown = null) {
+  const node: any = {};
+  node.select = () => node;
+  node.where = () => node;
+  node.executeTakeFirst = jest.fn().mockResolvedValue(stored);
+  instance.db.selectFrom.mockReturnValue(node);
+}
+
 function service() {
   const db: any = {
     selectFrom: jest.fn(),
@@ -285,6 +294,7 @@ describe('AiService settings and policy', () => {
 
   it('uses permission-filtered search only when enabled', async () => {
     const instance = service();
+    mockSettingsProbe(instance);
     await instance.semanticSearch(user, workspace, 'roadmap');
     expect(instance['searchService'].searchPage).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'roadmap' }),
@@ -331,15 +341,17 @@ describe('AiService settings and policy', () => {
       space,
     });
     instance.db.selectFrom.mockReturnValue({
-      select: () => ({
-        where: () => ({
-          where: () => ({
-            execute: jest
-              .fn()
-              .mockResolvedValue([page('p1', 'First'), page('p2', 'Second')]),
-          }),
-        }),
-      }),
+      select: () => {
+        // Shared chain node: the workspace-settings probe resolves first
+        // (executeTakeFirst), then the page hydration executes.
+        const node: any = {};
+        node.where = () => node;
+        node.execute = jest
+          .fn()
+          .mockResolvedValue([page('p1', 'First'), page('p2', 'Second')]);
+        node.executeTakeFirst = jest.fn().mockResolvedValue(null);
+        return node;
+      },
     });
 
     const result = await instance.semanticSearch(user, workspace, 'roadmap');
@@ -354,6 +366,7 @@ describe('AiService settings and policy', () => {
 
   it('falls back only when semantic indexing is explicitly unavailable', async () => {
     const instance = service();
+    mockSettingsProbe(instance);
     instance.indexService.rank.mockRejectedValue(
       Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }),
     );
@@ -367,6 +380,7 @@ describe('AiService settings and policy', () => {
 
   it('surfaces semantic index corruption instead of silently degrading', async () => {
     const instance = service();
+    mockSettingsProbe(instance);
     instance.indexService.rank.mockRejectedValue(new Error('invalid vector'));
     await expect(
       instance.semanticSearch(user, workspace, 'roadmap'),
@@ -462,9 +476,173 @@ describe('AiService settings and policy', () => {
       }),
     });
 
-    await instance.complete(workspace, 'chat', 'request');
+    await instance.complete(user, workspace, 'chat', 'request');
 
     expect(instance.requests.has('ws:chat:request')).toBe(false);
     expect(release).toHaveBeenCalled();
+  });
+
+  it('runs chat retrieval once with skipRerank and the full overrides', async () => {
+    const instance = service();
+    instance['ragChatRetrieval'].retrieveForChat.mockResolvedValue({
+      evidence: [],
+      rewrittenQuery: '',
+      rewriteApplied: false,
+      expansionVariants: [],
+      retrieval: { mode: 'hybrid', rerankStatus: 'not_applicable' },
+    });
+
+    const result = await instance['retrieveRagContext'](
+      workspace,
+      'user',
+      [{ role: 'user', content: 'question' }],
+      false,
+      'space-1',
+      { rerankModel: 'override-model' },
+    );
+    // Empty evidence keeps the retrieval metadata (rerankStatus
+    // not_applicable) instead of collapsing to null.
+    expect(result.evidence).toEqual([]);
+    expect(result.context).toBeNull();
+    expect(result.retrieval).toEqual({
+      mode: 'hybrid',
+      rerankStatus: 'not_applicable',
+    });
+    const [actor, input] =
+      instance['ragChatRetrieval'].retrieveForChat.mock.calls[0];
+    expect(actor).toEqual({ userId: 'user', workspaceId: 'ws' });
+    // retrieveForChat itself runs the retriever in skipRerank mode, so chat
+    // reranks exactly once inside RagChatRetrievalService.
+    expect(input).toMatchObject({
+      query: 'question',
+      spaceId: 'space-1',
+      overrides: { rerankModel: 'override-model' },
+    });
+    expect(input).not.toHaveProperty('pageIds');
+    expect(input).not.toHaveProperty('mode');
+  });
+
+  it('re-authorizes stored citation sources at reload time', async () => {
+    const instance = service();
+    const node: any = {};
+    node.select = () => node;
+    node.where = () => node;
+    node.execute = jest.fn().mockResolvedValue([
+      { id: 'p1', spaceId: 's1' },
+      { id: 'p2', spaceId: 's2' },
+    ]);
+    instance.db.selectFrom.mockReturnValue(node);
+    instance['pageAccessService'].validateCanView = jest
+      .fn()
+      .mockImplementation((page: any) =>
+        page.id === 'p1'
+          ? Promise.resolve()
+          : Promise.reject(new Error('forbidden')),
+      );
+    const view = await instance['assistantMessageView'](user, {
+      id: 'm1',
+      role: 'assistant',
+      content: 'answer',
+      metadata: {
+        retrieval: { mode: 'hybrid', rerankStatus: 'applied' },
+        sources: [
+          {
+            citationId: '1',
+            pageId: 'p1',
+            title: 'A',
+            url: '/s/s1/p/a',
+            locator: null,
+          },
+          {
+            citationId: '2',
+            pageId: 'p2',
+            title: 'B',
+            url: '/s/s2/p/b',
+            locator: null,
+          },
+        ],
+      },
+      createdAt: new Date(),
+    });
+    // The retrieval metadata stays intact; the source whose page the user
+    // can no longer view is dropped from the projected view.
+    expect(view.retrieval).toEqual({ mode: 'hybrid', rerankStatus: 'applied' });
+    expect(view.sources.map((source: any) => source.pageId)).toEqual(['p1']);
+  });
+
+  it('drops stale and unauthorized evidence before the model stage', async () => {
+    const instance = service();
+    const freshnessNode: any = {};
+    for (const method of ['innerJoin', 'where', 'whereRef', 'select']) {
+      freshnessNode[method] = () => freshnessNode;
+    }
+    // p1 is fresh at revision 2; p2's publication pointer no longer matches
+    // its desired revision, so it yields no freshness row.
+    freshnessNode.execute = jest
+      .fn()
+      .mockResolvedValue([{ pageId: 'p1', inputRevision: '2' }]);
+    const pagesNode: any = {};
+    for (const method of ['select', 'where']) {
+      pagesNode[method] = () => pagesNode;
+    }
+    pagesNode.execute = jest.fn().mockResolvedValue([
+      { id: 'p1', spaceId: 's1' },
+      { id: 'p3', spaceId: 's3' },
+    ]);
+    instance.db.selectFrom.mockImplementation((table: string) =>
+      table.startsWith('ragSourceState') ? freshnessNode : pagesNode,
+    );
+    instance['pageAccessService'].validateCanView = jest
+      .fn()
+      .mockImplementation((page: any) =>
+        page.id === 'p1'
+          ? Promise.resolve()
+          : Promise.reject(new Error('forbidden')),
+      );
+
+    const rag = {
+      context: 'stale context',
+      evidence: [
+        {
+          chunkId: 'c1',
+          key: { workspaceId: 'ws', pageId: 'p1' },
+          inputRevision: '2',
+          text: 'fresh',
+          locator: null,
+          score: { kind: 'rrf', value: 1 },
+        },
+        {
+          chunkId: 'c2',
+          key: { workspaceId: 'ws', pageId: 'p2' },
+          inputRevision: '1',
+          text: 'stale',
+          locator: null,
+          score: { kind: 'rrf', value: 0.5 },
+        },
+        {
+          chunkId: 'c3',
+          key: { workspaceId: 'ws', pageId: 'p3' },
+          inputRevision: '2',
+          text: 'restricted',
+          locator: null,
+          score: { kind: 'rrf', value: 0.4 },
+        },
+      ],
+      retrieval: { mode: 'hybrid', rerankStatus: 'applied' },
+    };
+    const result = await instance['revalidateRagEvidence'](
+      user,
+      workspace,
+      rag as any,
+    );
+    // The stale revision and the page the user cannot view are dropped; the
+    // context is rebuilt from the survivors and the retrieval metadata is
+    // preserved untouched.
+    expect(result.evidence.map((item: any) => item.text)).toEqual(['fresh']);
+    expect(result.context).toContain('fresh');
+    expect(result.retrieval).toEqual({
+      mode: 'hybrid',
+      rerankStatus: 'applied',
+    });
   });
 });

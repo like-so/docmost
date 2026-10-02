@@ -185,7 +185,12 @@ export class RagRetrievalSettingsDto {
   rerankThreshold?: number;
 }
 
-export class RagChatRetrievalSettingsDto {
+/**
+ * Owner-controlled chat retrieval settings: ALL RetrievalConfig fields (chat
+ * carries independent defaults for recall and rerank) plus the
+ * rewrite/expansion extras.
+ */
+export class RagChatRetrievalSettingsDto extends RagRetrievalSettingsDto {
   @IsOptional()
   @IsBoolean()
   rewriteEnabled?: boolean;
