@@ -5,7 +5,7 @@ import {
   encodingForModel,
   getEncoding,
 } from 'js-tiktoken';
-import { Tokenizer } from '@huggingface/tokenizers';
+import { Tokenizer } from 'tokenizers';
 import { request } from 'undici';
 
 /**
@@ -13,10 +13,11 @@ import { request } from 'undici';
  * is counted as plain text with no model framing; framing overhead is the
  * number of special tokens the tokenizer post-processor wraps a single
  * sequence in (0 for tiktoken profiles, 2 for the registered pinned Unigram
- * tokenizer).
+ * tokenizer). The native tokenizer engine resolves counts asynchronously;
+ * tiktoken counts resolve synchronously, so callers accept both.
  */
 export interface RagTokenizer {
-  countTextTokens(text: string): number;
+  countTextTokens(text: string): number | Promise<number>;
   inputOverheadTokens: number;
 }
 
@@ -187,15 +188,32 @@ async function loadRegisteredHfTokenizer(
           `RAG chunker: pinned tokenizer payload for "${tokenizerId}" is not a tokenizer definition`,
         );
       }
-      const tokenizer = new Tokenizer(tokenizerJson, {});
-      const inputOverheadTokens = derivePostProcessorOverhead(
+      // The native tokenizers engine executes the artifact's own
+      // normalization (including the Precompiled charsmap), pre-tokenization
+      // and Unigram model exactly as the embedding server does. Padding and
+      // truncation stay disabled: counting must never alter the input.
+      let tokenizer: Tokenizer;
+      try {
+        tokenizer = Tokenizer.fromString(body);
+      } catch (error) {
+        throw new Error(
+          `RAG chunker: pinned tokenizer payload for "${tokenizerId}" was rejected by the tokenizer engine: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      tokenizer.disableTruncation();
+      tokenizer.disablePadding();
+      const inputOverheadTokens = await derivePostProcessorOverhead(
         tokenizerId,
         tokenizerJson,
         tokenizer,
       );
       return {
         countTextTokens: (text: string) =>
-          tokenizer.encode(text, { add_special_tokens: false }).ids.length,
+          tokenizer
+            .encode(text, undefined, { addSpecialTokens: false })
+            .then((encoding) => encoding.getIds().length),
         inputOverheadTokens,
       };
     } finally {
@@ -211,11 +229,11 @@ async function loadRegisteredHfTokenizer(
  * empty string with special tokens actually produces, otherwise the pinned
  * tokenizer is rejected instead of being counted with invented framing.
  */
-function derivePostProcessorOverhead(
+async function derivePostProcessorOverhead(
   tokenizerId: string,
   tokenizerJson: unknown,
   tokenizer: Tokenizer,
-): number {
+): Promise<number> {
   const postProcessor = (
     tokenizerJson as {
       post_processor?: { type?: unknown; single?: unknown };
@@ -238,9 +256,10 @@ function derivePostProcessorOverhead(
       `RAG chunker: pinned tokenizer "${tokenizerId}" has an invalid post-processor template`,
     );
   }
-  const framedEmptyTokens = tokenizer.encode('', {
-    add_special_tokens: true,
-  }).ids.length;
+  const framedEmptyEncoding = await tokenizer.encode('', undefined, {
+    addSpecialTokens: true,
+  });
+  const framedEmptyTokens = framedEmptyEncoding.getIds().length;
   if (framedEmptyTokens !== overhead) {
     throw new Error(
       `RAG chunker: pinned tokenizer "${tokenizerId}" framing overhead ${overhead} does not match its actual empty-input framing ${framedEmptyTokens}`,

@@ -15,7 +15,12 @@ interface CharRange {
   end: number;
 }
 
-type TokenCounter = (text: string) => number;
+/**
+ * Token counts resolve synchronously for tiktoken profiles and
+ * asynchronously for the native tokenizer engine used by pinned hf:
+ * profiles; every counting site awaits the result either way.
+ */
+type TokenCounter = (text: string) => number | Promise<number>;
 
 @Injectable()
 export class RagChunker implements Chunker {
@@ -39,7 +44,7 @@ export class RagChunker implements Chunker {
     const chunks: Chunk[] = [];
     let ordinal = 0;
     for (const section of document.sections) {
-      const ranges = splitSectionRanges(
+      const ranges = await splitSectionRanges(
         section.text,
         countTokens,
         sourceBudget,
@@ -74,7 +79,7 @@ export class RagChunker implements Chunker {
           text,
           // The stored count includes the model framing so it is directly
           // comparable with maxChunkTokens and the model input limit.
-          tokenCount: countTokens(text) + tokenizer.inputOverheadTokens,
+          tokenCount: (await countTokens(text)) + tokenizer.inputOverheadTokens,
           locator,
         });
       }
@@ -215,23 +220,23 @@ function smallestScalarEnd(text: string, start: number): number {
  * exact section slice. The final range always reaches the section end: no
  * tail text is lost.
  */
-function splitSectionRanges(
+async function splitSectionRanges(
   text: string,
   countTokens: TokenCounter,
   sourceBudget: number,
   overlapTokens: number,
-): CharRange[] {
+): Promise<CharRange[]> {
   if (text.length === 0) {
     return [];
   }
-  if (countTokens(text) <= sourceBudget) {
+  if ((await countTokens(text)) <= sourceBudget) {
     return [{ start: 0, end: text.length }];
   }
 
   // Pieces leave room for the overlap so a carried suffix never pushes the
   // next chunk over the budget.
   const pieceBudget = sourceBudget - overlapTokens;
-  const pieces = tokenBoundedPieces(
+  const pieces = await tokenBoundedPieces(
     text,
     countTokens,
     pieceBudget,
@@ -250,11 +255,15 @@ function splitSectionRanges(
     if (packedEnd > chunkStart) {
       // The budget applies to the complete next-chunk slice, not to
       // separately summed piece counts.
-      const candidateTokens = countTokens(text.slice(chunkStart, piece.end));
+      const candidateTokens = await countTokens(
+        text.slice(chunkStart, piece.end),
+      );
       if (candidateTokens > sourceBudget) {
         ranges.push({ start: chunkStart, end: packedEnd });
-        const pieceTokens = countTokens(text.slice(piece.start, piece.end));
-        chunkStart = overlapStart(
+        const pieceTokens = await countTokens(
+          text.slice(piece.start, piece.end),
+        );
+        chunkStart = await overlapStart(
           text,
           pieces,
           nextPieceIndex,
@@ -263,7 +272,9 @@ function splitSectionRanges(
           countTokens,
           Math.min(overlapTokens, sourceBudget - pieceTokens),
         );
-        if (countTokens(text.slice(chunkStart, piece.end)) > sourceBudget) {
+        if (
+          (await countTokens(text.slice(chunkStart, piece.end))) > sourceBudget
+        ) {
           chunkStart = packedEnd;
         }
       }
@@ -284,21 +295,23 @@ function splitSectionRanges(
  * complete character fits either limit the split fails explicitly instead
  * of emitting over-budget or invalid text.
  */
-function tokenBoundedPieces(
+async function tokenBoundedPieces(
   text: string,
   countTokens: TokenCounter,
   pieceBudget: number,
   sourceBudget: number,
-): CharRange[] {
+): Promise<CharRange[]> {
   const pieces: CharRange[] = [];
   for (const segment of lineSegments(text)) {
-    if (countTokens(text.slice(segment.start, segment.end)) <= pieceBudget) {
+    if (
+      (await countTokens(text.slice(segment.start, segment.end))) <= pieceBudget
+    ) {
       pieces.push(segment);
       continue;
     }
     let start = segment.start;
     while (start < segment.end) {
-      let end = largestEndWithinBudget(
+      let end = await largestEndWithinBudget(
         text,
         start,
         segment.end,
@@ -307,7 +320,7 @@ function tokenBoundedPieces(
       );
       if (end === -1) {
         end = smallestScalarEnd(text, start);
-        const singleTokens = countTokens(text.slice(start, end));
+        const singleTokens = await countTokens(text.slice(start, end));
         if (singleTokens > sourceBudget) {
           throw new Error(
             'RAG chunker: a single character exceeds the source-text token ' +
@@ -344,13 +357,13 @@ function lineSegments(text: string): CharRange[] {
  * character fits the budget. The binary search skips utf16 positions inside
  * surrogate pairs and never returns an over-budget end.
  */
-function largestEndWithinBudget(
+async function largestEndWithinBudget(
   text: string,
   start: number,
   limit: number,
   countTokens: TokenCounter,
   budget: number,
-): number {
+): Promise<number> {
   let low = start + 1;
   let high = limit;
   let best = -1;
@@ -361,7 +374,7 @@ function largestEndWithinBudget(
       low = mid + 1;
       continue;
     }
-    if (countTokens(text.slice(start, candidate)) <= budget) {
+    if ((await countTokens(text.slice(start, candidate))) <= budget) {
       best = candidate;
       low = candidate + 1;
     } else {
@@ -378,7 +391,7 @@ function largestEndWithinBudget(
  * actual token count fits the budget, and to no overlap when nothing fits,
  * so progress is always guaranteed.
  */
-function overlapStart(
+async function overlapStart(
   text: string,
   pieces: CharRange[],
   nextPieceIndex: number,
@@ -386,7 +399,7 @@ function overlapStart(
   currentChunkStart: number,
   countTokens: TokenCounter,
   overlapBudget: number,
-): number {
+): Promise<number> {
   if (overlapBudget <= 0) {
     return packedEnd;
   }
@@ -400,7 +413,9 @@ function overlapStart(
     if (piece.start < currentChunkStart) {
       break;
     }
-    if (countTokens(text.slice(piece.start, packedEnd)) > overlapBudget) {
+    if (
+      (await countTokens(text.slice(piece.start, packedEnd))) > overlapBudget
+    ) {
       break;
     }
     start = piece.start;
@@ -408,7 +423,7 @@ function overlapStart(
   if (
     start > currentChunkStart &&
     start < packedEnd &&
-    countTokens(text.slice(start, packedEnd)) <= overlapBudget
+    (await countTokens(text.slice(start, packedEnd))) <= overlapBudget
   ) {
     return start;
   }
@@ -425,7 +440,9 @@ function overlapStart(
       low = mid + 1;
       continue;
     }
-    if (countTokens(text.slice(candidate, packedEnd)) <= overlapBudget) {
+    if (
+      (await countTokens(text.slice(candidate, packedEnd))) <= overlapBudget
+    ) {
       best = candidate;
       high = candidate - 1;
     } else {

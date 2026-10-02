@@ -307,9 +307,10 @@ describe('RagChunker', () => {
         expect(section.text.slice(chunk.locator.start, chunk.locator.end)).toBe(
           chunk.text,
         );
-        expect(tokenizer.countTextTokens(chunk.text)).toBeGreaterThan(0);
+        expect(await tokenizer.countTextTokens(chunk.text)).toBeGreaterThan(0);
         expect(chunk.tokenCount).toBe(
-          tokenizer.countTextTokens(chunk.text) + tokenizer.inputOverheadTokens,
+          (await tokenizer.countTextTokens(chunk.text)) +
+            tokenizer.inputOverheadTokens,
         );
         expect(chunk.tokenCount).toBeLessThanOrEqual(
           makeHfProfile().maxChunkTokens,
@@ -344,12 +345,12 @@ describe('RagChunker', () => {
             section.text.slice(chunk.locator.start, chunk.locator.end),
           ).toBe(chunk.text);
           // source-text tokens fit the framed budget
-          expect(tokenizer.countTextTokens(chunk.text)).toBeLessThanOrEqual(
-            effectiveBudget,
-          );
+          expect(
+            await tokenizer.countTextTokens(chunk.text),
+          ).toBeLessThanOrEqual(effectiveBudget);
           // stored count includes the framing
           expect(chunk.tokenCount).toBe(
-            tokenizer.countTextTokens(chunk.text) + 2,
+            (await tokenizer.countTextTokens(chunk.text)) + 2,
           );
           expect(chunk.tokenCount).toBeLessThanOrEqual(profile.maxChunkTokens);
           expect(hasIsolatedSurrogate(chunk.text)).toBe(false);
@@ -363,9 +364,9 @@ describe('RagChunker', () => {
             current.locator.start - previous.locator.start,
           );
           if (overlapSlice.length > 0) {
-            expect(tokenizer.countTextTokens(overlapSlice)).toBeLessThanOrEqual(
-              profile.overlapTokens,
-            );
+            expect(
+              await tokenizer.countTextTokens(overlapSlice),
+            ).toBeLessThanOrEqual(profile.overlapTokens);
           }
         }
         const last = batch.chunks[batch.chunks.length - 1];
