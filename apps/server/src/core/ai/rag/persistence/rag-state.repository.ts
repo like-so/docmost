@@ -52,7 +52,17 @@ export class RagStateRepository {
       .where('workspaceId', '=', key.workspaceId)
       .where('pageId', '=', key.pageId)
       .executeTakeFirst();
-    return (row as RagSourceStateRow | undefined) ?? null;
+    if (!row) return null;
+    // int8 columns arrive as numbers under the driver's bigint parse config;
+    // normalize to the decimal-string InputRevision contract at the boundary.
+    return {
+      ...(row as RagSourceStateRow),
+      desiredInputRevision: toInputRevision(row.desiredInputRevision),
+      publishedInputRevision:
+        row.publishedInputRevision == null
+          ? null
+          : toInputRevision(row.publishedInputRevision),
+    };
   }
 
   /**

@@ -3,7 +3,7 @@ import { KyselyDB } from '@docmost/db/types/kysely.types';
 import { Injectable } from '@nestjs/common';
 import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
 import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
-import { RagActor, RagEvidence } from '../contracts';
+import { RagActor, RagEvidence, toInputRevision } from '../contracts';
 
 /**
  * Centralized post-async evidence gate (docmost-rag-v1 contract 12). Every
@@ -81,7 +81,9 @@ export class RagEvidenceGate {
       spaceId: string;
     }>) {
       fresh.set(row.chunkId, {
-        inputRevision: row.inputRevision,
+        // int8 arrives as a number under the driver's bigint parse config;
+        // compare against the decimal-string contract, not the raw value.
+        inputRevision: toInputRevision(row.inputRevision),
         spaceId: row.spaceId,
       });
     }

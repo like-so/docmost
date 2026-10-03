@@ -10,6 +10,7 @@ import {
   PublishOutcome,
   RagError,
   StageResult,
+  toInputRevision,
 } from '../contracts';
 import { RagStateRepository } from '../persistence/rag-state.repository';
 
@@ -164,7 +165,7 @@ export class RagGenerationStore implements GenerationStore {
         generation &&
         generation.workspaceId === key.workspaceId &&
         generation.pageId === key.pageId &&
-        generation.inputRevision === inputRevision &&
+        toInputRevision(generation.inputRevision) === inputRevision &&
         generation.profileHash === profileHash;
 
       if (!matches) {

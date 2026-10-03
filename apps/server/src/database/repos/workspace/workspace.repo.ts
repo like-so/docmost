@@ -218,7 +218,7 @@ export class WorkspaceRepo {
       .set({
         settings: sql`COALESCE(settings, '{}'::jsonb)
                 || jsonb_build_object('ai', COALESCE(settings->'ai', '{}'::jsonb)
-                || jsonb_build_object('providerSecret', ${encryptedProvider}))`,
+                || jsonb_build_object('providerSecret', ${encryptedProvider}::text))`,
         updatedAt: new Date(),
       })
       .where('id', '=', workspaceId)

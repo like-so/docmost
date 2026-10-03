@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { sql } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB, KyselyTransaction } from '@docmost/db/types/kysely.types';
-import { IndexRequest, InputRevision, parseIndexRequest } from '../contracts';
+import { IndexRequest, parseIndexRequest, toInputRevision } from '../contracts';
 
 /**
  * Durable outbox of IndexRequests. Inserts are idempotent on the eventId
@@ -95,7 +95,7 @@ export class RagOutboxRepository {
       schemaVersion: row.schemaVersion,
       eventId: row.id,
       key: { workspaceId: row.workspaceId, pageId: row.pageId },
-      inputRevision: row.inputRevision as InputRevision,
+      inputRevision: toInputRevision(row.inputRevision),
       operation: row.operation,
       cause: row.cause,
       occurredAt: row.occurredAt.toISOString(),
