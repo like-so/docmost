@@ -53,7 +53,11 @@ export class RagEvidenceGate {
       .innerJoin('ragGenerations as rg', (join) =>
         join.onRef('rg.id', '=', 'rss.publishedGenerationId'),
       )
-      .innerJoin('ragWorkspaceProfile as rwp', 'rwp.workspaceId', 'rss.workspaceId')
+      .innerJoin(
+        'ragWorkspaceProfile as rwp',
+        'rwp.workspaceId',
+        'rss.workspaceId',
+      )
       .innerJoin('pages as p', 'p.id', 'rc.pageId')
       .where('rc.id', 'in', chunkIds)
       .where('rc.workspaceId', '=', actor.workspaceId)
