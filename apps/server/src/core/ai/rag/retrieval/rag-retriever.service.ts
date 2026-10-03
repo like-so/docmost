@@ -2,6 +2,7 @@ import { Inject, Injectable, Optional } from '@nestjs/common';
 import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB } from '@docmost/db/types/kysely.types';
 import { RawBuilder, sql } from 'kysely';
+import { EncryptionService } from '../../../../integrations/encryption/encryption.service';
 import {
   EmbeddingPort,
   IndexProfile,
@@ -20,6 +21,11 @@ import {
   RAG_RERANK_PORT,
   toInputRevision,
 } from '../contracts';
+import {
+  readWorkspaceAiProvider,
+  workspaceDefaultRerankModel,
+} from '../embedding/provider-settings';
+import { Workspace } from '@docmost/db/types/entity.types';
 import { RagStateRepository } from '../persistence/rag-state.repository';
 import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
 import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
@@ -47,6 +53,7 @@ import {
   fuseVectorOnly,
 } from './fusion';
 import { applyRerankStage, buildModelPassage } from './rerank';
+import { RagEvidenceGate } from './rag-evidence-gate';
 
 /**
  * The hard recall ceiling follows the settings contract: the effective
@@ -95,6 +102,8 @@ export class RagRetrieverService implements RagRetriever {
     @Inject(RAG_EMBEDDING_PORT) private readonly embeddingPort: EmbeddingPort,
     private readonly pagePermissionRepo: PagePermissionRepo,
     private readonly spaceMemberRepo: SpaceMemberRepo,
+    private readonly encryption: EncryptionService,
+    private readonly evidenceGate: RagEvidenceGate,
     @Optional()
     @Inject(RAG_RERANK_PORT)
     private readonly rerankPort?: RagRerankPort,
@@ -136,7 +145,7 @@ export class RagRetrieverService implements RagRetriever {
         limit,
       );
       return {
-        evidence: scored,
+        evidence: await this.evidenceGate.validate(actor, scored),
         retrieval: { mode: query.mode, rerankStatus: 'not_applicable' },
       };
     }
@@ -158,7 +167,7 @@ export class RagRetrieverService implements RagRetriever {
         limit,
       );
       return {
-        evidence: scored,
+        evidence: await this.evidenceGate.validate(actor, scored),
         retrieval: { mode: query.mode, rerankStatus: 'not_applicable' },
       };
     }
@@ -171,7 +180,10 @@ export class RagRetrieverService implements RagRetriever {
       strategy,
       limit,
     );
-    return { evidence: scored, retrieval: { mode: query.mode, rerankStatus } };
+    return {
+      evidence: await this.evidenceGate.validate(actor, scored),
+      retrieval: { mode: query.mode, rerankStatus },
+    };
   }
 
   private emptyResult(mode: RagRetrievalMode): RagRetrieveResult {
@@ -239,11 +251,7 @@ export class RagRetrieverService implements RagRetriever {
       fused = fuseHybrid(vector, keyword);
     }
 
-    const stored = await this.readWorkspaceSettings(
-      actor.workspaceId,
-      'retrievalSettings',
-    );
-    const settings = mergeRetrievalOverride(stored, query.overrides);
+    const settings = await this.effectiveSettings(actor.workspaceId, query);
 
     // Recall/fusion-only mode (chat pipeline): the caller performs the single
     // final rerank at its own boundary, so this stage must not rerank twice.
@@ -254,7 +262,14 @@ export class RagRetrieverService implements RagRetriever {
       };
     }
 
-    if (!settings.rerankModel || !this.rerankPort) {
+    // Server-side model resolution: an explicit reference is used as-is; a
+    // cleared or absent one discovers the owner-configured default on the
+    // workspace's own provider settings. No available model is not_configured.
+    const rerankModel = await this.resolveRerankModel(
+      actor.workspaceId,
+      settings.rerankModel,
+    );
+    if (!rerankModel || !this.rerankPort) {
       return {
         evidence: fused.slice(0, limit).map((candidate) => candidate.evidence),
         rerankStatus: 'not_configured',
@@ -276,7 +291,7 @@ export class RagRetrieverService implements RagRetriever {
     try {
       const result = await this.rerankPort.rerank(
         actor.workspaceId,
-        settings.rerankModel,
+        rerankModel,
         trimmedQuery,
         passages,
       );
@@ -317,13 +332,8 @@ export class RagRetrieverService implements RagRetriever {
   ): Promise<RagEvidence[]> {
     let vectorThreshold: number | null = null;
     if (pool !== null) {
-      const stored = await this.readWorkspaceSettings(
-        actor.workspaceId,
-        'retrievalSettings',
-      );
-      vectorThreshold = mergeRetrievalOverride(
-        stored,
-        query.overrides,
+      vectorThreshold = (
+        await this.effectiveSettings(actor.workspaceId, query)
       ).vectorThreshold;
     }
 
@@ -439,13 +449,13 @@ export class RagRetrieverService implements RagRetriever {
     );
 
     // Bounded authorized-budget fill: authorize each BM25-ordered page before
-    // it can occupy budget, keep filling until the pool is met, the matching
-    // corpus is exhausted, or the bounded scan gives up (a pathological
-    // corpus where almost everything is unauthorized must not scan forever).
+    // it can occupy budget, and keep streaming windows until the pool is met
+    // or the matching corpus is exhausted — there is no arbitrary window
+    // cutoff, so a corpus with many denied hits cannot exhaust the scan before
+    // the first authorized candidate is reached.
     const pageSize = Math.max(1, pool);
-    const maxPages = 8;
     const evidence: RagEvidence[] = [];
-    for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+    for (let pageIndex = 0; ; pageIndex += 1) {
       const candidates = await this.loadKeywordCandidates(
         actor,
         query,
@@ -700,6 +710,62 @@ export class RagRetrieverService implements RagRetriever {
       }),
     );
     return inSpace.filter((candidate) => accessible.has(candidate.pageId));
+  }
+
+  /**
+   * Effective retrieval settings for one run: an already-merged `settings`
+   * payload (the chat pipeline's own effective config) is used verbatim;
+   * otherwise the stored flow settings merge with the per-request overrides.
+   */
+  private async effectiveSettings(
+    workspaceId: string,
+    query: RagRetrieverQuery,
+  ) {
+    if (query.settings) return query.settings;
+    const stored = await this.readWorkspaceSettings(
+      workspaceId,
+      'retrievalSettings',
+    );
+    return mergeRetrievalOverride(stored, query.overrides);
+  }
+
+  /**
+   * Workspace-authorized rerank model resolution: a non-blank explicit
+   * reference is used as-is (validated by the rerank adapter against the
+   * workspace's own provider); a cleared or absent reference discovers the
+   * owner-configured default on the existing encrypted provider settings.
+   * Unreadable provider settings mean no available model, not an error.
+   */
+  private async resolveRerankModel(
+    workspaceId: string,
+    explicit: string | null,
+  ): Promise<string | null> {
+    if (explicit) return explicit;
+    const row = await this.db
+      .selectFrom('workspaces')
+      .select('settings')
+      .where('id', '=', workspaceId)
+      .executeTakeFirst();
+    if (!row) return null;
+    try {
+      return workspaceDefaultRerankModel(
+        readWorkspaceAiProvider(row as Workspace, this.encryption),
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The centralized post-async evidence gate, exposed for the chat boundary:
+   * ai.service revalidates the pre-model evidence and the generated response
+   * through this same component (see RagEvidenceGate).
+   */
+  validateEvidence(
+    actor: RagActor,
+    evidence: RagEvidence[],
+  ): Promise<RagEvidence[]> {
+    return this.evidenceGate.validate(actor, evidence);
   }
 
   private toEvidence(

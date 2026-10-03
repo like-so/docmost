@@ -31,16 +31,23 @@ describe('mergeRetrievalOverride', () => {
     rerankThreshold: 0.4,
   };
 
-  it('inherits the stored default for an omitted, null, or blank rerankModel', () => {
+  it('keeps the stored model when rerankModel is omitted, clears it on null or blank', () => {
     for (const overrides of [
       undefined,
       {},
-      { rerankModel: null },
-      { rerankModel: '   ' },
     ] as const) {
       expect(mergeRetrievalOverride(stored, overrides).rerankModel).toBe(
         'stored-model',
       );
+    }
+    // An explicit null (or blank) is a clear, not an inherit: the merged
+    // settings lose the stored explicit choice so the server's flow-default
+    // resolution runs from scratch (null is NOT a disable switch).
+    for (const overrides of [
+      { rerankModel: null },
+      { rerankModel: '   ' },
+    ] as const) {
+      expect(mergeRetrievalOverride(stored, overrides).rerankModel).toBeNull();
     }
   });
 

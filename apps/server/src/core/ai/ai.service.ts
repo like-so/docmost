@@ -1,6 +1,7 @@
 import {
   BadGatewayException,
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -31,6 +32,7 @@ import {
 } from '../../integrations/audit/audit.service';
 import { RagRetrieverService } from './rag/retrieval/rag-retriever.service';
 import { RagChatRetrievalService } from './rag/retrieval/rag-chat-retrieval.service';
+import { RagEvidenceGate } from './rag/retrieval/rag-evidence-gate';
 import { RagError, RagEvidence, RagRetrievalMeta } from './rag/contracts';
 import { mergeRetrievalOverride } from './rag/retrieval/retrieval-config';
 import { JsonValue } from '@docmost/db/types/db';
@@ -40,6 +42,7 @@ type AiProvider = {
   baseUrl: string;
   chatModel: string;
   embeddingModel?: string;
+  rerankModel?: string;
   apiKey?: string;
 };
 
@@ -96,6 +99,7 @@ export class AiService {
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
     private readonly ragRetriever: RagRetrieverService,
     private readonly ragChatRetrieval: RagChatRetrievalService,
+    private readonly evidenceGate: RagEvidenceGate,
   ) {}
 
   async getProvider(workspace: Workspace) {
@@ -123,6 +127,7 @@ export class AiService {
             baseUrl: provider.baseUrl,
             chatModel: provider.chatModel,
             embeddingModel: provider.embeddingModel,
+            rerankModel: provider.rerankModel,
           },
         },
       },
@@ -478,6 +483,23 @@ export class AiService {
           throw new BadGatewayException(
             'AI provider returned an empty response',
           );
+        if (rag && rag.evidence.length > 0) {
+          // Post-generation guard: evidence supplied to the model can become
+          // unauthorized while the model call is in flight. If ANY supplied
+          // chunk no longer passes the gate, the answer may embed material
+          // the user can no longer see, so the generated content is
+          // discarded — never persisted, emitted or trimmed into citations.
+          const revalidated = await this.revalidateRagEvidence(
+            user,
+            workspace,
+            rag,
+          );
+          if (revalidated.evidence.length !== rag.evidence.length) {
+            throw new ConflictException(
+              'Workspace evidence changed during generation; the answer was discarded',
+            );
+          }
+        }
         const assistantMetadata: JsonValue = rag
           ? ({
               retrieval: rag.retrieval,
@@ -589,6 +611,13 @@ export class AiService {
       baseUrl: url.toString(),
       chatModel: input.chatModel.trim(),
       embeddingModel: input.embeddingModel?.trim(),
+      // An explicit null (or blank) clears the stored default rerank model;
+      // omission keeps the existing reference. The server resolves whatever
+      // reference survives against its own provider configuration.
+      rerankModel:
+        input.rerankModel === undefined
+          ? undefined
+          : input.rerankModel?.trim() || undefined,
       apiKey: input.apiKey?.trim(),
     };
   }
@@ -651,6 +680,7 @@ export class AiService {
       baseUrl: provider.baseUrl,
       chatModel: provider.chatModel,
       embeddingModel: provider.embeddingModel,
+      rerankModel: provider.rerankModel,
     };
   }
 
@@ -706,13 +736,14 @@ export class AiService {
   }
 
   /**
-   * Post-rerank, pre-model revalidation of the chat evidence: every chunk
-   * must still come from a live, currently published source whose published
-   * generation still matches the evidence revision and the workspace's
-   * enabled profile, and the requesting user must still hold current view
-   * access to the page. Failing chunks are dropped; the context is rebuilt
-   * from the survivors so the model stage and the persisted citations never
-   * see stale or unauthorized material.
+   * Post-rerank, pre-model revalidation of the chat evidence, delegated to
+   * the shared chunk-level gate: every chunk must still come from a live,
+   * currently published source whose published generation still matches the
+   * evidence's own generationId, revision and the workspace's enabled
+   * profile, and the requesting user must still hold current view access.
+   * Failing chunks are dropped; the context is rebuilt from the survivors so
+   * the model stage and the persisted citations never see stale or
+   * unauthorized material.
    */
   private async revalidateRagEvidence(
     user: User,
@@ -730,51 +761,9 @@ export class AiService {
     if (rag.evidence.length === 0) {
       return { ...rag, context: null };
     }
-    const pageIds = [...new Set(rag.evidence.map((item) => item.key.pageId))];
-    const freshness = await this.db
-      .selectFrom('ragSourceState as rss')
-      .innerJoin('ragGenerations as rg', 'rg.id', 'rss.publishedGenerationId')
-      .innerJoin(
-        'ragWorkspaceProfile as rwp',
-        'rwp.workspaceId',
-        'rss.workspaceId',
-      )
-      .where('rss.workspaceId', '=', workspace.id)
-      .where('rss.pageId', 'in', pageIds)
-      .where('rwp.enabled', '=', true)
-      .whereRef('rg.profileHash', '=', 'rwp.profileHash')
-      .where('rg.status', '=', 'published')
-      .where('rss.sourceStatus', '=', 'live')
-      .whereRef('rss.publishedInputRevision', '=', 'rss.desiredInputRevision')
-      .select(['rss.pageId as pageId', 'rg.inputRevision as inputRevision'])
-      .execute();
-    const fresh = new Map(
-      freshness.map((row) => [
-        row.pageId as string,
-        row.inputRevision as string,
-      ]),
-    );
-
-    const pageRows = await this.db
-      .selectFrom('pages')
-      .select(['pages.id', 'pages.spaceId'])
-      .where('pages.id', 'in', pageIds)
-      .where('pages.deletedAt', 'is', null)
-      .execute();
-    const viewable = new Set<string>();
-    for (const page of pageRows) {
-      try {
-        await this.pageAccessService.validateCanView(page as Page, user);
-        viewable.add(page.id);
-      } catch {
-        // Authorization failure drops the page, never the whole chat.
-      }
-    }
-
-    const evidence = rag.evidence.filter(
-      (item) =>
-        viewable.has(item.key.pageId) &&
-        fresh.get(item.key.pageId) === item.inputRevision,
+    const evidence = await this.evidenceGate.validate(
+      { userId: user.id, workspaceId: workspace.id },
+      rag.evidence,
     );
     return {
       evidence,

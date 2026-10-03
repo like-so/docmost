@@ -71,8 +71,15 @@ export class OpenAiCompatibleRerankAdapter implements RagRerankPort {
           results?: Array<{ index?: unknown; relevance_score?: unknown }>;
         };
         const results = result.results;
-        if (!Array.isArray(results)) return { status: 'failed' };
-        const scores = new Array<number>(passages.length);
+        // Exact-one coverage is required: a partially covered or empty
+        // response can never pass, so an indexed scan (not a hole-skipping
+        // check) verifies every passage has exactly one finite score.
+        if (!Array.isArray(results) || results.length !== passages.length) {
+          return { status: 'failed' };
+        }
+        const scores = new Array<number | undefined>(passages.length).fill(
+          undefined,
+        );
         for (const entry of results) {
           const index = entry?.index;
           const score = entry?.relevance_score;
@@ -91,10 +98,12 @@ export class OpenAiCompatibleRerankAdapter implements RagRerankPort {
           }
           scores[index] = score;
         }
-        if (scores.some((score) => score === undefined)) {
-          return { status: 'failed' };
+        for (let i = 0; i < passages.length; i += 1) {
+          if (scores[i] === undefined) {
+            return { status: 'failed' };
+          }
         }
-        return { status: 'ok', scores };
+        return { status: 'ok', scores: scores as number[] };
       } finally {
         await lease.release();
       }

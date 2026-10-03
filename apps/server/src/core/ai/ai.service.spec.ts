@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -53,6 +54,7 @@ function service() {
         expansionVariants: [],
       }),
     } as any,
+    { validate: jest.fn().mockResolvedValue([]) } as any,
   ) as any;
 }
 
@@ -572,45 +574,26 @@ describe('AiService settings and policy', () => {
 
   it('drops stale and unauthorized evidence before the model stage', async () => {
     const instance = service();
-    const freshnessNode: any = {};
-    for (const method of ['innerJoin', 'where', 'whereRef', 'select']) {
-      freshnessNode[method] = () => freshnessNode;
-    }
-    // p1 is fresh at revision 2; p2's publication pointer no longer matches
-    // its desired revision, so it yields no freshness row.
-    freshnessNode.execute = jest
+    // revalidateRagEvidence delegates to the shared chunk-level gate; the
+    // gate is stubbed to return only the fresh, authorized survivor.
+    const survivors = [
+      {
+        chunkId: 'c1',
+        key: { workspaceId: 'ws', pageId: 'p1' },
+        inputRevision: '2',
+        text: 'fresh',
+        locator: null,
+        score: { kind: 'rrf', value: 1 },
+      },
+    ];
+    instance['evidenceGate'].validate = jest
       .fn()
-      .mockResolvedValue([{ pageId: 'p1', inputRevision: '2' }]);
-    const pagesNode: any = {};
-    for (const method of ['select', 'where']) {
-      pagesNode[method] = () => pagesNode;
-    }
-    pagesNode.execute = jest.fn().mockResolvedValue([
-      { id: 'p1', spaceId: 's1' },
-      { id: 'p3', spaceId: 's3' },
-    ]);
-    instance.db.selectFrom.mockImplementation((table: string) =>
-      table.startsWith('ragSourceState') ? freshnessNode : pagesNode,
-    );
-    instance['pageAccessService'].validateCanView = jest
-      .fn()
-      .mockImplementation((page: any) =>
-        page.id === 'p1'
-          ? Promise.resolve()
-          : Promise.reject(new Error('forbidden')),
-      );
+      .mockResolvedValue(survivors);
 
     const rag = {
       context: 'stale context',
       evidence: [
-        {
-          chunkId: 'c1',
-          key: { workspaceId: 'ws', pageId: 'p1' },
-          inputRevision: '2',
-          text: 'fresh',
-          locator: null,
-          score: { kind: 'rrf', value: 1 },
-        },
+        ...survivors,
         {
           chunkId: 'c2',
           key: { workspaceId: 'ws', pageId: 'p2' },
@@ -635,18 +618,21 @@ describe('AiService settings and policy', () => {
       workspace,
       rag as any,
     );
-    // The stale revision and the page the user cannot view are dropped; the
-    // context is rebuilt from the survivors and the retrieval metadata is
-    // preserved untouched.
+    // The gate's survivors are the new evidence; the context is rebuilt from
+    // them and the retrieval metadata is preserved untouched.
     expect(result.evidence.map((item: any) => item.text)).toEqual(['fresh']);
     expect(result.context).toContain('fresh');
     expect(result.retrieval).toEqual({
       mode: 'hybrid',
       rerankStatus: 'applied',
     });
+    expect(instance['evidenceGate'].validate).toHaveBeenCalledWith(
+      { userId: 'user', workspaceId: 'ws' },
+      rag.evidence,
+    );
   });
 
-  it('drops a citation source revoked while the model call is in flight', async () => {
+  it('discards the generated answer when evidence is revoked while the model call is in flight', async () => {
     const instance = service();
     instance.readProvider = jest.fn().mockReturnValue({
       driver: 'openai',
@@ -655,13 +641,20 @@ describe('AiService settings and policy', () => {
       apiKey: 'secret',
     });
     let p1Authorized = true;
-    instance['pageAccessService'].validateCanView = jest
+    const evidenceChunk = {
+      chunkId: 'c1',
+      key: { workspaceId: 'ws', pageId: 'p1' },
+      inputRevision: '2',
+      text: 'fresh',
+      locator: null,
+      score: { kind: 'rrf', value: 1 },
+    };
+    // The shared gate revalidates live state: while p1 is still authorized it
+    // returns the evidence, and after the in-flight revocation it returns
+    // nothing.
+    instance['evidenceGate'].validate = jest
       .fn()
-      .mockImplementation((page: any) =>
-        page.id === 'p1' && p1Authorized
-          ? Promise.resolve()
-          : Promise.reject(new Error('forbidden')),
-      );
+      .mockImplementation(async () => (p1Authorized ? [evidenceChunk] : []));
 
     const messagesNode: any = {};
     for (const method of ['select', 'where', 'orderBy']) {
@@ -672,37 +665,13 @@ describe('AiService settings and policy', () => {
         .fn()
         .mockResolvedValue([{ role: 'user', content: 'question' }]),
     });
-    const freshnessNode: any = {};
-    for (const method of ['innerJoin', 'where', 'whereRef', 'select']) {
-      freshnessNode[method] = () => freshnessNode;
-    }
-    freshnessNode.execute = jest
-      .fn()
-      .mockResolvedValue([{ pageId: 'p1', inputRevision: '2' }]);
-    const pagesNode: any = {};
-    for (const method of ['select', 'where']) {
-      pagesNode[method] = () => pagesNode;
-    }
-    pagesNode.execute = jest
-      .fn()
-      .mockResolvedValue([{ id: 'p1', spaceId: 's1' }]);
     instance.db.selectFrom.mockImplementation((table: string) => {
       if (table === 'aiChatMessages') return messagesNode;
-      if (table.startsWith('ragSourceState')) return freshnessNode;
-      return pagesNode;
+      return {};
     });
 
     instance['ragChatRetrieval'].retrieveForChat.mockResolvedValue({
-      evidence: [
-        {
-          chunkId: 'c1',
-          key: { workspaceId: 'ws', pageId: 'p1' },
-          inputRevision: '2',
-          text: 'fresh',
-          locator: null,
-          score: { kind: 'rrf', value: 1 },
-        },
-      ],
+      evidence: [evidenceChunk],
       rewrittenQuery: '',
       rewriteApplied: false,
       expansionVariants: [],
@@ -722,38 +691,23 @@ describe('AiService settings and policy', () => {
           .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
       },
     } as unknown as Awaited<ReturnType<typeof undici.request>>;
-    // The page loses authorization while the provider call is in flight:
-    // revalidation already ran (pre-model), hydration runs after the
-    // response, so the flip lands between them.
+    // The page loses authorization while the provider call is in flight: the
+    // flip lands between the pre-model revalidation and the post-generation
+    // guard.
     jest.spyOn(undici, 'request').mockImplementation(async () => {
       p1Authorized = false;
       return response;
     });
 
-    let persisted: any;
-    instance.db.insertInto.mockImplementation(() => ({
-      values: (values: any) => {
-        persisted = values;
-        return {
-          returning: () => ({
-            executeTakeFirstOrThrow: jest
-              .fn()
-              .mockResolvedValue({ id: 'm1' }),
-          }),
-        };
-      },
-    }));
+    instance.db.insertInto = jest.fn();
 
-    await instance.complete(user, workspace, 'chat', 'request');
+    await expect(
+      instance.complete(user, workspace, 'chat', 'request'),
+    ).rejects.toThrow(ConflictException);
 
-    // The answer is persisted, but the in-flight-revoked page never becomes
-    // a stored citation source; retrieval metadata is preserved.
-    expect(persisted.content).toBe('ok');
-    expect(persisted.metadata.retrieval).toEqual({
-      mode: 'hybrid',
-      rerankStatus: 'applied',
-    });
-    expect(persisted.metadata.sources).toEqual([]);
+    // Fail-safe outcome: the generated content is neither persisted nor
+    // emitted; no citation hydration ever runs.
+    expect(instance.db.insertInto).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalled();
   });
 });

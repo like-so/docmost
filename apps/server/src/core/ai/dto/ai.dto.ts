@@ -15,10 +15,11 @@ import { Type } from 'class-transformer';
 
 /**
  * Flat per-request retrieval overrides (docmost-rag-v1 contract 12). rerankModel
- * is an optional nullable workspace-authorized model reference: omission or
- * null inherits the flow default through normal server-side resolution and is
- * NOT a disable switch; a non-blank reference is validated server-side and
- * resolved against the workspace's own provider configuration.
+ * is an optional nullable workspace-authorized model reference: omission keeps
+ * the stored explicit model, while an explicit null (or blank) CLEARS it and
+ * then runs the same workspace-authorized server-side default resolution —
+ * null is NOT a disable switch. A non-blank reference is validated
+ * server-side and resolved against the workspace's own provider configuration.
  */
 export class RagRetrievalOverridesDto {
   @IsOptional() @IsInt() @Min(1) @Max(200) recallCount?: number;
@@ -36,6 +37,13 @@ export class UpdateAiProviderDto {
   @IsString() @MaxLength(2048) baseUrl: string;
   @IsString() @MaxLength(120) chatModel: string;
   @IsOptional() @IsString() @MaxLength(120) embeddingModel?: string;
+  /**
+   * Owner-configured default rerank model on the workspace's own provider
+   * settings: the workspace-authorized fallback when a retrieval flow has no
+   * explicit rerankModel. Omission keeps the stored reference; null or a
+   * blank value clears it.
+   */
+  @IsOptional() @IsString() @MaxLength(120) rerankModel?: string | null;
   @IsOptional() @IsString() @MaxLength(4096) apiKey?: string;
 }
 

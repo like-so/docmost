@@ -9,6 +9,7 @@ import {
 } from '../persistence/rag-test-db';
 import { RagStateRepository } from '../persistence/rag-state.repository';
 import { RagRetrieverService } from './rag-retriever.service';
+import { RagEvidenceGate } from './rag-evidence-gate';
 import {
   FixtureEmbeddingPort,
   FixtureProfileResolver,
@@ -125,6 +126,10 @@ jest.setTimeout(30000);
         new FixtureEmbeddingPort(queryVectors, PROFILE_HASH),
         pagePermissionRepo,
         spaceMemberRepo,
+        {
+          decrypt: jest.fn().mockReturnValue('{}'),
+        } as never,
+        new RagEvidenceGate(db, pagePermissionRepo, spaceMemberRepo),
         rerankPort,
       );
       await run({ db, workspaceId, actorUserId, stateRepo, retriever });
@@ -318,19 +323,24 @@ jest.setTimeout(30000);
 
   it('caps keyword recall by BM25 over the full matching set, not by ts_rank preselection', async () => {
     await setup(async (ctx) => {
-      // ts_rank ranks the repeated common term far above the rare term, but
-      // BM25 (matching the pinned reference paradedb.score ordering) must
-      // keep the rare-term chunk when the recall window holds one candidate.
+      // Genuinely over-cap corpus (61 candidates, pool floor 50): 60 chunks
+      // repeating the common term rank ABOVE the rare-term chunk by ts_rank
+      // (0.0464 vs 0.0304, the long rare-term document loses the tf weight),
+      // so a ts_rank top-50 preselection window drops it. BM25 must still win
+      // because the rare term carries the idf: the zeta chunk is the only
+      // document matching it, while alpha appears in every document.
       const commonPage = await createPage(ctx, { member: true });
-      await publishPage(ctx, commonPage.pageId, [
-        {
+      await publishPage(
+        ctx,
+        commonPage.pageId,
+        Array.from({ length: 60 }, () => ({
           text: 'alpha alpha alpha alpha alpha alpha alpha alpha filler filler filler filler',
           embedding: null,
-        },
-      ]);
+        })),
+      );
       const rarePage = await createPage(ctx, { member: true });
       await publishPage(ctx, rarePage.pageId, [
-        { text: 'alpha zeta', embedding: null },
+        { text: `zeta ${'padding token '.repeat(60)}`, embedding: null },
       ]);
 
       const evidence = await retrieve(ctx, 'keyword', {
@@ -338,7 +348,7 @@ jest.setTimeout(30000);
         limit: 1,
       });
       expect(evidence).toHaveLength(1);
-      expect(evidence[0].text).toBe('alpha zeta');
+      expect(evidence[0].text).toContain('zeta');
       expect(evidence[0].score.kind).toBe('keyword');
       expect(evidence[0].score.value).toBeGreaterThan(0);
     });
@@ -860,11 +870,13 @@ jest.setTimeout(30000);
 
   it('fills the keyword recall budget with authorized candidates after restricted pages', async () => {
     await setup(async (ctx) => {
-      // 60 short alpha-dense chunks on a page restricted against the actor:
-      // any single BM25-ordered window of 50 rows contains only restricted
-      // candidates, so an authorize-after-cap pipeline would return nothing.
+      // 420 short alpha-dense chunks on a page restricted against the actor:
+      // with the pool floor of 50, the old fixed 8-window pre-authorization
+      // scan covered only the first 400 BM25-ordered rows, so an authorized
+      // candidate ranked behind 400+ denied hits was unreachable. The
+      // streaming authorized-budget fill must keep going until exhaustion.
       const restrictedPage = await createPage(ctx, { member: true });
-      const chunks = Array.from({ length: 60 }, (_, index) => ({
+      const chunks = Array.from({ length: 420 }, (_, index) => ({
         text: `alpha alpha filler ${index}`,
         embedding: null,
       }));
@@ -877,7 +889,7 @@ jest.setTimeout(30000);
 
       const memberPage = await createPage(ctx, { member: true });
       // tf=1 in a long document: the lowest BM25 score of the whole matching
-      // corpus, so the member candidate sits behind every restricted row.
+      // corpus, so the member candidate sits behind all 420 restricted rows.
       await publishPage(ctx, memberPage.pageId, [
         {
           text: `alpha ${'padding token '.repeat(60)}`,

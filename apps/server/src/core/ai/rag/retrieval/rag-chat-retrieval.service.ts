@@ -30,6 +30,7 @@ import { EncryptionService } from '../../../../integrations/encryption/encryptio
 import { chatUrlFor, providerHeadersFor } from '../../ai.service';
 import {
   readWorkspaceAiProvider,
+  workspaceDefaultRerankModel,
   WorkspaceAiProvider,
 } from '../embedding/provider-settings';
 
@@ -71,12 +72,13 @@ export interface RagChatRetrievalOutput {
  * the search defaults.
  *
  * Authorization: every chunk returned here passed the retriever's
- * recheck-at-return boundary (space membership plus page-level restrictions,
- * rechecked immediately before evidence leaves RagRetrieverService). The
- * rewrite and rerank stages transform already-authorized evidence in memory
- * and issue no new fetches, so no second authorization gap exists here; the
- * chat caller rechecks current authorization again before model stages and
- * final output.
+ * post-recall gate (space membership plus page-level restrictions plus
+ * generation/revision/profile binding, revalidated at the RagEvidenceGate
+ * before evidence leaves RagRetrieverService). The rewrite and rerank stages
+ * transform already-authorized evidence in memory and issue no new fetches;
+ * the rerank stage is asynchronous, so the chat caller revalidates the
+ * post-rerank evidence through the same gate before model stages and final
+ * output.
  */
 @Injectable()
 export class RagChatRetrievalService {
@@ -117,13 +119,16 @@ export class RagChatRetrievalService {
       };
     }
 
+    // The chat flow's OWN effective config is passed as the merged settings
+    // payload: the retriever must not re-merge the unrelated search-flow
+    // stored settings over these chat thresholds.
     let evidence = await this.retriever
       .retrieve(actor, {
         query: rewrittenQuery,
         mode,
         limit: retrieval.recallCount,
         ...(input.spaceId ? { spaceId: input.spaceId } : {}),
-        ...(input.overrides ? { overrides: input.overrides } : {}),
+        settings: retrieval,
         skipRerank: true,
       })
       .then((result) => result.evidence);
@@ -180,7 +185,13 @@ export class RagChatRetrievalService {
     if (evidence.length === 0) {
       return { evidence: [], rerankStatus: 'not_applicable' };
     }
-    if (!retrieval.rerankModel || !this.rerankPort) {
+    // Same server-side model resolution as the retriever: an explicit
+    // reference as-is, otherwise the owner-configured default on the
+    // workspace's own provider settings; no available model is not_configured.
+    const rerankModel =
+      retrieval.rerankModel ??
+      (await this.discoverDefaultRerankModel(workspaceId));
+    if (!rerankModel || !this.rerankPort) {
       return {
         evidence: evidence.slice(0, retrieval.recallCount),
         rerankStatus: 'not_configured',
@@ -201,7 +212,7 @@ export class RagChatRetrievalService {
     try {
       const result = await this.rerankPort.rerank(
         workspaceId,
-        retrieval.rerankModel,
+        rerankModel,
         input.query.trim(),
         passages,
       );
@@ -346,6 +357,21 @@ export class RagChatRetrievalService {
       .executeTakeFirst();
     if (!row) return undefined;
     return readWorkspaceAiProvider(row, this.encryption);
+  }
+
+  /**
+   * Default rerank-model discovery for a cleared/absent explicit reference:
+   * the owner-configured reference on the workspace's own provider settings.
+   * Unreadable provider settings mean no available model, not an error.
+   */
+  private async discoverDefaultRerankModel(
+    workspaceId: string,
+  ): Promise<string | null> {
+    try {
+      return workspaceDefaultRerankModel(await this.readProvider(workspaceId));
+    } catch {
+      return null;
+    }
   }
 
   private async readStoredSettings(

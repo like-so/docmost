@@ -39,6 +39,7 @@ import { RagOutboxRelayService } from './rag-outbox-relay.service';
 import { RagRetrieverService } from './retrieval/rag-retriever.service';
 import { RagChatRetrievalService } from './retrieval/rag-chat-retrieval.service';
 import { OpenAiCompatibleRerankAdapter } from './retrieval/openai-compatible.rerank.adapter';
+import { RagEvidenceGate } from './retrieval/rag-evidence-gate';
 
 /**
  * Wiring-level profile adapter (docmost-rag-v1 contract 13). The HTTP
@@ -293,6 +294,7 @@ export class RagComposedProfileResolver implements RagProfileResolver {
     RagOutboxRelayService,
     OpenAiCompatibleRerankAdapter,
     { provide: RAG_RERANK_PORT, useExisting: OpenAiCompatibleRerankAdapter },
+    RagEvidenceGate,
     RagRetrieverService,
     RagChatRetrievalService,
   ],
@@ -303,6 +305,7 @@ export class RagComposedProfileResolver implements RagProfileResolver {
     RAG_PROFILE_RESOLVER,
     RAG_EMBEDDING_PORT,
     RAG_RERANK_PORT,
+    RagEvidenceGate,
     RagRetrieverService,
     RagChatRetrievalService,
   ],

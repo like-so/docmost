@@ -16,6 +16,7 @@ export interface WorkspaceAiProvider {
   baseUrl: string;
   chatModel: string;
   embeddingModel?: string;
+  rerankModel?: string;
   apiKey?: string;
 }
 
@@ -44,6 +45,19 @@ export function readWorkspaceAiProvider(
     throw new Error('Workspace AI provider settings are unreadable');
   }
   return provider as WorkspaceAiProvider;
+}
+
+/**
+ * The workspace-authorized default rerank model: the owner-configured
+ * reference on the existing encrypted AI provider settings. A blank or
+ * missing reference means no default is available; callers resolve that to
+ * not_configured rather than guessing a model name.
+ */
+export function workspaceDefaultRerankModel(
+  provider: WorkspaceAiProvider | undefined,
+): string | null {
+  const model = provider?.rerankModel;
+  return typeof model === 'string' && model.trim() ? model.trim() : null;
 }
 
 /**

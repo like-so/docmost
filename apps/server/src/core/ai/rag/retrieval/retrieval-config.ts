@@ -178,11 +178,12 @@ export function parseChatRetrievalSettings(
 /**
  * Merges per-request overrides over stored settings for a retrieval run.
  * Plain knobs override when present. rerankModel follows the published
- * server-resolution semantics: an omitted or null override is NOT a disable
- * switch — it inherits the flow default (the stored explicit model, which
- * itself may be null after normal default discovery). Only a non-blank
- * explicit reference overrides the stored value; the server resolves that
- * reference against the workspace's own provider configuration.
+ * server-resolution semantics: an omitted override keeps the stored explicit
+ * model, while an explicit null (or a blank reference) CLEARS the stored
+ * choice so the flow default resolution runs from scratch; null is NOT a
+ * disable switch. Only a non-blank explicit reference overrides the stored
+ * value; the server resolves every reference against the workspace's own
+ * provider configuration before the rerank stage.
  */
 export function mergeRetrievalOverride(
   stored: unknown,
@@ -200,8 +201,8 @@ export function mergeRetrievalOverride(
     ...(knob.keywordThreshold !== undefined
       ? { keywordThreshold: knob.keywordThreshold }
       : {}),
-    ...(typeof knob.rerankModel === 'string' && knob.rerankModel.trim()
-      ? { rerankModel: knob.rerankModel.trim() }
+    ...(knob.rerankModel !== undefined
+      ? { rerankModel: knob.rerankModel }
       : {}),
     ...(knob.rerankTopK !== undefined ? { rerankTopK: knob.rerankTopK } : {}),
     ...(knob.rerankThreshold !== undefined

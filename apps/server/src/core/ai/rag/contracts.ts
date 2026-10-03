@@ -266,6 +266,14 @@ export interface RagRetrieverQuery {
    */
   overrides?: RagRetrievalOverride;
   /**
+   * Fully merged effective retrieval settings for flows that already resolved
+   * them (the chat pipeline merges the chat stored settings with its caller's
+   * overrides). When present, the retriever uses these directly instead of
+   * merging its own stored flow settings with `overrides`, so a chat request
+   * can never leak the unrelated search-flow thresholds.
+   */
+  settings?: RagRetrievalSettings;
+  /**
    * Recall/fusion-only mode: skips the final rerank stage inside the
    * retriever. The chat pipeline uses this so expansion and the single final
    * rerank happen once, at the chat boundary.
@@ -276,8 +284,10 @@ export interface RagRetrieverQuery {
 /**
  * Per-request overrides of the retrieval knobs. Absent fields keep the
  * stored (or default) values; the merged payload passes through the same
- * normalization as the stored settings. rerankModel null is NOT a disable
- * switch: it resolves through the same flow-default discovery as omission.
+ * normalization as the stored settings. rerankModel null clears the stored
+ * explicit choice and then runs the same server-side default resolution as
+ * an omitted reference; it is NOT a disable switch, and no available model
+ * resolves to not_configured.
  */
 export interface RagRetrievalOverride {
   recallCount?: number;
