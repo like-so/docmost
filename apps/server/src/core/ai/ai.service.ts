@@ -483,29 +483,39 @@ export class AiService {
           throw new BadGatewayException(
             'AI provider returned an empty response',
           );
-        if (rag && rag.evidence.length > 0) {
-          // Post-generation guard: evidence supplied to the model can become
-          // unauthorized while the model call is in flight. If ANY supplied
-          // chunk no longer passes the gate, the answer may embed material
-          // the user can no longer see, so the generated content is
-          // discarded — never persisted, emitted or trimmed into citations.
-          const revalidated = await this.revalidateRagEvidence(
-            user,
-            workspace,
-            rag,
-          );
-          if (revalidated.evidence.length !== rag.evidence.length) {
-            throw new ConflictException(
-              'Workspace evidence changed during generation; the answer was discarded',
-            );
-          }
-        }
+        // Citation hydration is asynchronous and can itself observe a
+        // mid-flight revocation, so it runs BEFORE the final guard: a
+        // dropped required citation must be visible to the last check.
         const assistantMetadata: JsonValue = rag
           ? ({
               retrieval: rag.retrieval,
               sources: await this.hydrateCitationSources(user, rag.evidence),
             } as unknown as JsonValue)
           : null;
+        if (rag && rag.evidence.length > 0) {
+          // Post-generation guard: evidence supplied to the model can become
+          // unauthorized while the model call or citation hydration is in
+          // flight. If ANY supplied chunk no longer passes the gate, or any
+          // hydrated citation was lost, the answer may embed material the
+          // user can no longer see, so the generated content is discarded
+          // whole — never persisted, emitted or trimmed into citations.
+          const revalidated = await this.revalidateRagEvidence(
+            user,
+            workspace,
+            rag,
+          );
+          const sources = (
+            assistantMetadata as unknown as { sources: unknown[] } | null
+          )?.sources;
+          if (
+            revalidated.evidence.length !== rag.evidence.length ||
+            sources?.length !== rag.evidence.length
+          ) {
+            throw new ConflictException(
+              'Workspace evidence changed during generation; the answer was discarded',
+            );
+          }
+        }
         return this.db
           .insertInto('aiChatMessages')
           .values({

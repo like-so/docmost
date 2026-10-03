@@ -665,8 +665,25 @@ describe('AiService settings and policy', () => {
         .fn()
         .mockResolvedValue([{ role: 'user', content: 'question' }]),
     });
+    // Hydration now runs before the post-generation guard; the page is still
+    // authorized during hydration, so the citation is kept and the gate is
+    // what drops the evidence after the in-flight revocation.
+    const pagesNode: any = {};
+    for (const method of ['select', 'where']) {
+      pagesNode[method] = () => pagesNode;
+    }
+    pagesNode.execute = jest.fn().mockResolvedValue([
+      {
+        id: 'p1',
+        slugId: 'p1',
+        title: 'P1',
+        spaceId: 's1',
+        space: { slug: 's1' },
+      },
+    ]);
     instance.db.selectFrom.mockImplementation((table: string) => {
       if (table === 'aiChatMessages') return messagesNode;
+      if (table === 'pages') return pagesNode;
       return {};
     });
 
@@ -706,7 +723,100 @@ describe('AiService settings and policy', () => {
     ).rejects.toThrow(ConflictException);
 
     // Fail-safe outcome: the generated content is neither persisted nor
-    // emitted; no citation hydration ever runs.
+    // emitted; the guard discards it after the in-flight revocation.
+    expect(instance.db.insertInto).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalled();
+  });
+
+  it('discards the generated answer when evidence is revoked during citation hydration', async () => {
+    const instance = service();
+    instance.readProvider = jest.fn().mockReturnValue({
+      driver: 'openai',
+      baseUrl: 'https://ai.example.test',
+      chatModel: 'chat',
+      apiKey: 'secret',
+    });
+    const evidenceChunk = {
+      chunkId: 'c1',
+      key: { workspaceId: 'ws', pageId: 'p1' },
+      inputRevision: '2',
+      text: 'fresh',
+      locator: null,
+      score: { kind: 'rrf', value: 1 },
+    };
+    // Both gate passes succeed, matching the reviewed probe: the revocation
+    // lands inside asynchronous citation hydration, which used to run after
+    // the post-generation gate.
+    instance['evidenceGate'].validate = jest
+      .fn()
+      .mockResolvedValue([evidenceChunk]);
+
+    const messagesNode: any = {};
+    for (const method of ['select', 'where', 'orderBy']) {
+      messagesNode[method] = () => messagesNode;
+    }
+    messagesNode.limit = () => ({
+      execute: jest
+        .fn()
+        .mockResolvedValue([{ role: 'user', content: 'question' }]),
+    });
+    const pagesNode: any = {};
+    for (const method of ['select', 'where']) {
+      pagesNode[method] = () => pagesNode;
+    }
+    pagesNode.execute = jest.fn().mockResolvedValue([
+      {
+        id: 'p1',
+        slugId: 'p1',
+        title: 'P1',
+        spaceId: 's1',
+        space: { slug: 's1' },
+      },
+    ]);
+    instance.db.selectFrom.mockImplementation((table: string) => {
+      if (table === 'aiChatMessages') return messagesNode;
+      if (table === 'pages') return pagesNode;
+      return {};
+    });
+
+    instance['ragChatRetrieval'].retrieveForChat.mockResolvedValue({
+      evidence: [evidenceChunk],
+      rewrittenQuery: '',
+      rewriteApplied: false,
+      expansionVariants: [],
+      retrieval: { mode: 'hybrid', rerankStatus: 'applied' },
+    });
+
+    const release = jest.fn();
+    instance.outboundAgent.lease = jest.fn().mockResolvedValue({
+      dispatcher: {},
+      release,
+    });
+    const response = {
+      statusCode: 200,
+      body: {
+        json: jest
+          .fn()
+          .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+      },
+    } as unknown as Awaited<ReturnType<typeof undici.request>>;
+    jest.spyOn(undici, 'request').mockResolvedValue(response);
+
+    // The page loses access exactly while citation hydration rechecks it:
+    // hydration drops the citation, and the final pre-insert guard must see
+    // that loss instead of persisting an answer with sources:[].
+    instance['pageAccessService'].validateCanView = jest
+      .fn()
+      .mockRejectedValue(new Error('revoked during hydration'));
+
+    instance.db.insertInto = jest.fn();
+
+    await expect(
+      instance.complete(user, workspace, 'chat', 'request'),
+    ).rejects.toThrow(ConflictException);
+
+    // Fail-safe outcome: the whole answer is discarded even though both
+    // evidence-gate passes succeeded.
     expect(instance.db.insertInto).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalled();
   });
