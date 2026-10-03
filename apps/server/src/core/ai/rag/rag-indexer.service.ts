@@ -16,6 +16,7 @@ import {
   RagError,
   RagIndexer,
   RagIndexerResult,
+  toInputRevision,
   RAG_CHUNKER,
   RAG_DOCUMENT_PARSER,
   RAG_EMBEDDING_PORT,
@@ -130,7 +131,7 @@ export class RagIndexerService implements RagIndexer {
       if (
         !state ||
         state.sourceStatus !== 'live' ||
-        state.desiredInputRevision !== request.inputRevision
+        toInputRevision(state.desiredInputRevision) !== request.inputRevision
       ) {
         return;
       }

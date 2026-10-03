@@ -33,6 +33,7 @@ import { RagGenerationQuery } from './rag-generation-query';
 
   const setup = async (
     run: (ctx: TestContext) => Promise<void>,
+    options?: { productionBigintParse?: boolean },
   ): Promise<void> => {
     await withRagTestDb(async (db) => {
       const workspaceId = randomUUID();
@@ -43,7 +44,7 @@ import { RagGenerationQuery } from './rag-generation-query';
       const store = new RagGenerationStore(db, stateRepo);
       const query = new RagGenerationQuery();
       await run({ db, store, stateRepo, query, key });
-    });
+    }, options);
   };
 
   const advance = (
@@ -753,6 +754,47 @@ import { RagGenerationQuery } from './rag-generation-query';
       const generations = await listGenerations(ctx);
       expect(generations.map((row) => row.id)).toEqual([restored.generationId]);
     });
+  });
+
+  it('preserves the current generation when the published pointer parses numerically', async () => {
+    await setup(
+      async (ctx) => {
+        await advance(ctx, 'upsert');
+        const first = await stageAndPublish(ctx, {
+          revision: '1',
+          profileHash: 'profile-a',
+          texts: ['revision one'],
+        });
+
+        // Production pools parse int8 pointers as numbers; the purge
+        // exclusion must still match the decimal-string revision.
+        await ctx.store.purge(ctx.key, toInputRevision('1'));
+
+        expect((await listGenerations(ctx)).map((row) => row.id)).toEqual([
+          first.generationId,
+        ]);
+      },
+      { productionBigintParse: true },
+    );
+  });
+
+  it('removes the numerically-parsed stale published pointer in delete cleanup', async () => {
+    await setup(
+      async (ctx) => {
+        await advance(ctx, 'upsert');
+        await stageAndPublish(ctx, {
+          revision: '1',
+          profileHash: 'profile-a',
+          texts: ['revision one'],
+        });
+
+        await advance(ctx, 'delete');
+        await ctx.store.purge(ctx.key, toInputRevision('2'));
+
+        expect(await listGenerations(ctx)).toHaveLength(0);
+      },
+      { productionBigintParse: true },
+    );
   });
 
   it('never lets a late publish after deletion resurrect content', async () => {

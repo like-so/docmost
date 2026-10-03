@@ -102,6 +102,7 @@ const profileConfig = (): IndexProfileConfig => ({
 
     const setup = async (
       run: (fx: Fixture) => Promise<void>,
+      options?: { productionBigintParse?: boolean },
     ): Promise<void> => {
       await withRagTestDb(async (db) => {
         const workspaceId = randomUUID();
@@ -276,7 +277,7 @@ const profileConfig = (): IndexProfileConfig => ({
           profileHash: () => computeProfileHash(profileConfig()),
         };
         await run(fx);
-      });
+      }, options);
     };
 
     it('publishes a committed upsert end to end through the real persistence components', async () => {
@@ -430,6 +431,53 @@ const profileConfig = (): IndexProfileConfig => ({
         const recovered = await fx.indexer.handle(request);
         expect(recovered.state).toBe('ready');
       });
+    });
+
+    it('persists the terminal failure when the locked row revision parses numerically', async () => {
+      await setup(
+        async (fx) => {
+          await fx.pageText('hello world');
+          await fx.enableProfile();
+          const request = await fx.recordChange('upsert');
+          fx.resolver.resolve.mockRejectedValueOnce(
+            new RagError('EMBEDDING_NOT_CONFIGURED', 'endpoint missing'),
+          );
+
+          const failed = await fx.indexer.handle(request);
+
+          expect(failed.state).toBe('failed');
+          const failedRow = await fx.db
+            .selectFrom('ragGenerations')
+            .selectAll()
+            .where('pageId', '=', fx.pageId)
+            .where('status', '=', 'failed')
+            .executeTakeFirst();
+          expect(failedRow?.errorCode).toBe('EMBEDDING_NOT_CONFIGURED');
+        },
+        { productionBigintParse: true },
+      );
+    });
+
+    it('keeps the numerically-parsed failure guard stale-safe for superseded claims', async () => {
+      await setup(
+        async (fx) => {
+          await fx.pageText('hello world');
+          await fx.enableProfile();
+          const stale = await fx.recordChange('upsert');
+          await fx.recordChange('upsert');
+
+          await fx.indexer.recordFailure(stale, 'EMBEDDING_NOT_CONFIGURED');
+
+          const failedRows = await fx.db
+            .selectFrom('ragGenerations')
+            .selectAll()
+            .where('pageId', '=', fx.pageId)
+            .where('status', '=', 'failed')
+            .execute();
+          expect(failedRows).toHaveLength(0);
+        },
+        { productionBigintParse: true },
+      );
     });
 
     it('leaves transient embedding failures to the bounded retry policy without a failed row', async () => {

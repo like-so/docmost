@@ -280,7 +280,8 @@ export class RagGenerationStore implements GenerationStore {
       // changed or deleted source and is removed with the rest.
       if (
         state?.publishedGenerationId &&
-        state.publishedInputRevision === throughInputRevision
+        state.publishedInputRevision != null &&
+        toInputRevision(state.publishedInputRevision) === throughInputRevision
       ) {
         deletion = deletion.where('id', '!=', state.publishedGenerationId);
       }

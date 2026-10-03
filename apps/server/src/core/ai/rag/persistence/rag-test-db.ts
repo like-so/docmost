@@ -23,8 +23,25 @@ const baseUrl = process.env.RAG_TEST_DATABASE_URL ?? process.env.DATABASE_URL;
 
 export const ragTestDbConfigured = Boolean(baseUrl);
 
+/**
+ * Mirrors the bigint type config in database.module.ts so focused regressions
+ * can read int8 columns as numbers exactly like the production pool. The
+ * default helper pool keeps the driver's string parsing.
+ */
+const productionBigintParse = {
+  types: {
+    bigint: {
+      to: 20,
+      from: [20, 1700],
+      serialize: (value: number) => value.toString(),
+      parse: (value: string) => Number.parseInt(value),
+    },
+  },
+};
+
 export async function withRagTestDb(
   run: (db: Kysely<DbInterface>) => Promise<void>,
+  options?: { productionBigintParse?: boolean },
 ): Promise<void> {
   if (!baseUrl) {
     throw new Error(
@@ -36,7 +53,10 @@ export async function withRagTestDb(
   await admin.unsafe(`CREATE DATABASE "${dbName}"`);
   const url = new URL(baseUrl);
   url.pathname = `/${dbName}`;
-  const pool = postgres(url.toString(), { max: 5 });
+  const pool = postgres(url.toString(), {
+    max: 5,
+    ...(options?.productionBigintParse ? productionBigintParse : {}),
+  });
   // Migrations run on a pluginless instance like src/database/migrate.ts; the
   // test instance mirrors database.module.ts with the CamelCasePlugin so
   // camelCase table names map to the snake_case schema. The migration Kysely
