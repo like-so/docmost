@@ -53,8 +53,11 @@ export class RagGenerationStore implements GenerationStore {
   async stage(
     batch: ChunkBatch,
     embeddingBatch: EmbeddingBatchResult,
+    options?: { vectorless?: boolean },
   ): Promise<StageResult> {
-    const vectorsByChunkId = this.validateBatchPairing(batch, embeddingBatch);
+    const vectorsByChunkId = options?.vectorless
+      ? this.validateVectorlessPairing(batch, embeddingBatch)
+      : this.validateBatchPairing(batch, embeddingBatch);
 
     try {
       return await this.db.transaction().execute(async (trx) => {
@@ -283,6 +286,30 @@ export class RagGenerationStore implements GenerationStore {
 
       await deletion.execute();
     });
+  }
+
+  /**
+   * Keyword-only (vectorless) pairing contract: the embedding batch must be
+   * empty, and chunks publish without vectors. The profileHash pairing check
+   * still applies so a keyword-only generation can never mix profiles.
+   */
+  private validateVectorlessPairing(
+    batch: ChunkBatch,
+    embeddingBatch: EmbeddingBatchResult,
+  ): Map<string, number[]> {
+    if (embeddingBatch.profileHash !== batch.profileHash) {
+      throw new RagError(
+        'INDEX_WRITE_FAILED',
+        'Embedding batch profileHash does not match the chunk batch',
+      );
+    }
+    if (embeddingBatch.vectors.length !== 0) {
+      throw new RagError(
+        'EMBEDDING_RESPONSE_INVALID',
+        'A vectorless stage must carry an empty embedding batch',
+      );
+    }
+    return new Map();
   }
 
   /**

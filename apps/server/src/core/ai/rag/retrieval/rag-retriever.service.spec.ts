@@ -9,6 +9,7 @@ import {
 } from '../persistence/rag-test-db';
 import { RagStateRepository } from '../persistence/rag-state.repository';
 import { RagRetrieverService } from './rag-retriever.service';
+import { RagEvidenceGate } from './rag-evidence-gate';
 import {
   FixtureEmbeddingPort,
   FixtureProfileResolver,
@@ -19,7 +20,7 @@ import {
   seedSpaceMember,
   seedUser,
 } from './rag-test-support';
-import { IndexProfile, RagEvidence } from '../contracts';
+import { IndexProfile, RagEvidence, RagRerankResult } from '../contracts';
 
 const PROFILE_HASH = 'profile-a';
 
@@ -52,6 +53,38 @@ interface TestContext {
   retriever: RagRetrieverService;
 }
 
+/**
+ * Fixture rerank port: records the passages it received and derives the
+ * model scores from a test-supplied function (a null simulates an
+ * unavailable model, reported as not_configured per the port contract).
+ */
+class FixtureRerankPort {
+  calls = 0;
+  receivedQueries: string[] = [];
+  receivedPassages: string[][] = [];
+  receivedModels: string[] = [];
+  constructor(
+    private readonly scoreFor: (
+      query: string,
+      passages: string[],
+    ) => number[] | null,
+  ) {}
+
+  async rerank(
+    _workspaceId: string,
+    model: string,
+    query: string,
+    passages: string[],
+  ): Promise<RagRerankResult> {
+    this.calls += 1;
+    this.receivedModels.push(model);
+    this.receivedQueries.push(query);
+    this.receivedPassages.push(passages);
+    const scores = this.scoreFor(query, passages);
+    return scores ? { status: 'ok', scores } : { status: 'not_configured' };
+  }
+}
+
 /** Seeds a page via the foundation helper and optionally joins the actor. */
 const createPage = async (
   ctx: TestContext,
@@ -77,6 +110,7 @@ jest.setTimeout(30000);
   const setup = async (
     run: (ctx: TestContext) => Promise<void>,
     queryVectors: Record<string, number[]> = {},
+    rerankPort?: FixtureRerankPort,
   ): Promise<void> => {
     await withRagTestDb(async (db) => {
       const workspaceId = randomUUID();
@@ -92,9 +126,26 @@ jest.setTimeout(30000);
         new FixtureEmbeddingPort(queryVectors, PROFILE_HASH),
         pagePermissionRepo,
         spaceMemberRepo,
+        {
+          decrypt: jest.fn().mockReturnValue('{}'),
+        } as never,
+        new RagEvidenceGate(db, pagePermissionRepo, spaceMemberRepo),
+        rerankPort,
       );
       await run({ db, workspaceId, actorUserId, stateRepo, retriever });
     });
+  };
+
+  /** Overwrites the workspace settings JSON for retrieval-settings tests. */
+  const setWorkspaceSettings = async (
+    ctx: TestContext,
+    settings: Record<string, unknown>,
+  ): Promise<void> => {
+    await ctx.db
+      .updateTable('workspaces')
+      .set({ settings: settings as never })
+      .where('id', '=', ctx.workspaceId)
+      .execute();
   };
 
   /**
@@ -249,7 +300,7 @@ jest.setTimeout(30000);
     );
   });
 
-  it('returns lexical evidence for keyword mode without embedding the query', async () => {
+  it('returns BM25 keyword evidence for keyword mode without embedding the query', async () => {
     await setup(async (ctx) => {
       const { pageId } = await createPage(ctx, { member: true });
       await publishPage(ctx, pageId, [
@@ -265,7 +316,40 @@ jest.setTimeout(30000);
       });
       expect(evidence).toHaveLength(1);
       expect(evidence[0].text).toBe('the quarterly report numbers');
-      expect(evidence[0].score.kind).toBe('lexical');
+      expect(evidence[0].score.kind).toBe('keyword');
+      expect(evidence[0].score.value).toBeGreaterThan(0);
+    });
+  });
+
+  it('caps keyword recall by BM25 over the full matching set, not by ts_rank preselection', async () => {
+    await setup(async (ctx) => {
+      // Genuinely over-cap corpus (61 candidates, pool floor 50): 60 chunks
+      // repeating the common term rank ABOVE the rare-term chunk by ts_rank
+      // (0.0464 vs 0.0304, the long rare-term document loses the tf weight),
+      // so a ts_rank top-50 preselection window drops it. BM25 must still win
+      // because the rare term carries the idf: the zeta chunk is the only
+      // document matching it, while alpha appears in every document.
+      const commonPage = await createPage(ctx, { member: true });
+      await publishPage(
+        ctx,
+        commonPage.pageId,
+        Array.from({ length: 60 }, () => ({
+          text: 'alpha alpha alpha alpha alpha alpha alpha alpha filler filler filler filler',
+          embedding: null,
+        })),
+      );
+      const rarePage = await createPage(ctx, { member: true });
+      await publishPage(ctx, rarePage.pageId, [
+        { text: `zeta ${'padding token '.repeat(60)}`, embedding: null },
+      ]);
+
+      const evidence = await retrieve(ctx, 'keyword', {
+        query: 'alpha zeta',
+        limit: 1,
+      });
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0].text).toContain('zeta');
+      expect(evidence[0].score.kind).toBe('keyword');
       expect(evidence[0].score.value).toBeGreaterThan(0);
     });
   });
@@ -500,9 +584,405 @@ jest.setTimeout(30000);
             { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
             { query: '   ', mode: 'semantic', limit: 5 },
           ),
-        ).toEqual({ evidence: [] });
+        ).toEqual({
+          evidence: [],
+          retrieval: { mode: 'semantic', rerankStatus: 'not_applicable' },
+        });
       },
       { probe: [0.9, 0.1], alpha: [1, 0], beta: [0.7, 0.7], gamma: [0, 1] },
+    );
+  });
+
+  it('fuses dense and keyword routes with weighted RRF in hybrid mode', async () => {
+    await setup(
+      async (ctx) => {
+        const densePage = await createPage(ctx, { member: true });
+        const keywordPage = await createPage(ctx, { member: true });
+        // 'alpha text' is reachable by both routes and wins the top rank on
+        // each (best cosine; shortest BM25 document for the 'alpha' term).
+        // 'alpha only' is reachable by the keyword route alone (a longer
+        // document, so a strictly lower BM25 score); 'dense only' matches the
+        // vector but shares no token with the query, dropping under the
+        // vector threshold.
+        await publishPage(ctx, densePage.pageId, [
+          { text: 'alpha text', embedding: [1, 0] },
+        ]);
+        await publishPage(ctx, keywordPage.pageId, [
+          {
+            text: 'alpha only appears much later in a longer body',
+            embedding: null,
+          },
+          { text: 'dense only', embedding: [0, 1] },
+        ]);
+
+        const result = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'hybrid', limit: 10 },
+        );
+        expect(result.evidence.map((item) => item.text)).toEqual([
+          'alpha text',
+          'alpha only appears much later in a longer body',
+        ]);
+        expect(result.evidence[0].score.kind).toBe('rrf');
+        // Weighted RRF (k=60, weights 0.7/0.3) normalized by the total weight:
+        // rank 1 on both routes reaches the maximum fused score of 1.
+        expect(result.evidence[0].score.value).toBeCloseTo(1, 8);
+        // Keyword rank 2 alone: 0.3/(60+2), normalized by (0.7+0.3)/(60+1).
+        expect(result.evidence[1].score.value).toBeCloseTo(
+          (0.3 / 62) * (61 / 1),
+          8,
+        );
+        // No rerank model configured: the fused order is the final answer.
+        expect(result.retrieval).toEqual({
+          mode: 'hybrid',
+          rerankStatus: 'not_configured',
+        });
+      },
+      { alpha: [1, 0] },
+    );
+  });
+
+  it('reranks the hybrid pool through the configured rerank model', async () => {
+    const rerankPort = new FixtureRerankPort((_query, passages) =>
+      passages.map((passage) => (passage.includes('delta') ? 0.9 : 0.05)),
+    );
+    await setup(
+      async (ctx) => {
+        const { pageId } = await createPage(ctx, { member: true });
+        await publishPage(ctx, pageId, [
+          { text: 'alpha beta gamma', embedding: null },
+          { text: 'alpha delta', embedding: null },
+        ]);
+        await setWorkspaceSettings(ctx, {
+          rag: {
+            retrievalSettings: {
+              rerankModel: 'rerank-model',
+              rerankTopK: 2,
+              rerankThreshold: 0.2,
+            },
+          },
+        });
+
+        const result = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'hybrid', limit: 10 },
+        );
+        expect(rerankPort.calls).toBe(1);
+        expect(rerankPort.receivedQueries).toEqual(['alpha']);
+        // The 0.05 model score falls below the 0.2 threshold: only the
+        // reranked winner survives, with a composite rerank score.
+        expect(result.evidence).toHaveLength(1);
+        expect(result.evidence[0].text).toBe('alpha delta');
+        expect(result.evidence[0].score.kind).toBe('rerank');
+        // 0.6 * 0.9 + 0.3 * base + 0.1 with a base in (0, 1].
+        expect(result.evidence[0].score.value).toBeGreaterThan(0.6);
+        expect(result.retrieval).toEqual({
+          mode: 'hybrid',
+          rerankStatus: 'applied',
+        });
+      },
+      {},
+      rerankPort,
+    );
+  });
+
+  it('keeps the fused order when the rerank model is unavailable', async () => {
+    const rerankPort = new FixtureRerankPort(() => null);
+    await setup(
+      async (ctx) => {
+        const { pageId } = await createPage(ctx, { member: true });
+        await publishPage(ctx, pageId, [
+          { text: 'alpha beta gamma', embedding: null },
+          { text: 'alpha delta', embedding: null },
+        ]);
+        await setWorkspaceSettings(ctx, {
+          rag: {
+            retrievalSettings: {
+              rerankModel: 'rerank-model',
+              rerankTopK: 2,
+            },
+          },
+        });
+
+        const result = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'hybrid', limit: 10 },
+        );
+        expect(rerankPort.calls).toBe(1);
+        expect(result.evidence.map((item) => item.score.kind)).toEqual([
+          'keyword',
+          'keyword',
+        ]);
+        // The model is configured but reports unavailable: the fused order
+        // stands and the status records the not_configured port outcome.
+        expect(result.retrieval).toEqual({
+          mode: 'hybrid',
+          rerankStatus: 'not_configured',
+        });
+      },
+      {},
+      rerankPort,
+    );
+  });
+
+  it('keeps the fused order when the rerank stage throws', async () => {
+    const rerankPort = new FixtureRerankPort(() => {
+      throw new Error('rerank endpoint down');
+    });
+    await setup(
+      async (ctx) => {
+        const { pageId } = await createPage(ctx, { member: true });
+        await publishPage(ctx, pageId, [
+          { text: 'alpha beta gamma', embedding: null },
+          { text: 'alpha delta', embedding: null },
+        ]);
+        await setWorkspaceSettings(ctx, {
+          rag: {
+            retrievalSettings: {
+              rerankModel: 'rerank-model',
+              rerankTopK: 2,
+            },
+          },
+        });
+
+        const result = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'hybrid', limit: 10 },
+        );
+        expect(result.evidence.map((item) => item.score.kind)).toEqual([
+          'keyword',
+          'keyword',
+        ]);
+        expect(result.retrieval).toEqual({
+          mode: 'hybrid',
+          rerankStatus: 'failed',
+        });
+      },
+      {},
+      rerankPort,
+    );
+  });
+
+  it('honors indexingStrategy channel gates from stored settings', async () => {
+    await setup(
+      async (ctx) => {
+        const { pageId } = await createPage(ctx, { member: true });
+        await publishPage(ctx, pageId, [
+          { text: 'alpha text', embedding: [1, 0] },
+        ]);
+
+        // Keyword-only: semantic retrieval has no vector channel to serve.
+        await setWorkspaceSettings(ctx, {
+          rag: {
+            indexProfileConfig: {
+              indexingStrategy: { vectorEnabled: false, keywordEnabled: true },
+            },
+          },
+        });
+        const semantic = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'semantic', limit: 10 },
+        );
+        expect(semantic.evidence).toHaveLength(0);
+        const hybrid = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'hybrid', limit: 10 },
+        );
+        expect(hybrid.evidence.map((item) => item.text)).toEqual([
+          'alpha text',
+        ]);
+        // Single-route fusion keeps the route's own score kind (reference
+        // fuseOrDeduplicate only computes RRF when both routes contributed).
+        expect(hybrid.evidence[0].score.kind).toBe('keyword');
+
+        // Vector-only: the keyword route is gated off entirely.
+        await setWorkspaceSettings(ctx, {
+          rag: {
+            indexProfileConfig: {
+              indexingStrategy: { vectorEnabled: true, keywordEnabled: false },
+            },
+          },
+        });
+        const keyword = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'keyword', limit: 10 },
+        );
+        expect(keyword.evidence).toHaveLength(0);
+      },
+      { alpha: [1, 0] },
+    );
+  });
+
+  it('never serves chunks from a staged generation of the same source', async () => {
+    await setup(async (ctx) => {
+      const { pageId } = await createPage(ctx, { member: true });
+      const publishedGenerationId = await publishPage(ctx, pageId, [
+        { text: 'published text', embedding: null },
+      ]);
+
+      // A concurrently staged newer revision: its chunks share page,
+      // workspace and profile hash with the published generation and would
+      // leak through a source-state-only join.
+      const stagedGenerationId = randomUUID();
+      await ctx.db
+        .insertInto('ragGenerations')
+        .values({
+          id: stagedGenerationId,
+          workspaceId: ctx.workspaceId,
+          pageId,
+          inputRevision: '9',
+          profileHash: PROFILE_HASH,
+          status: 'staged',
+        })
+        .execute();
+      await ctx.db
+        .insertInto('ragChunks')
+        .values({
+          id: randomUUID(),
+          generationId: stagedGenerationId,
+          workspaceId: ctx.workspaceId,
+          pageId,
+          ordinal: 0,
+          text: 'staged secret text',
+          tokenCount: 8,
+          textHash: 'hash-staged',
+          locator: {
+            pageId,
+            headingPath: [],
+            start: 0,
+            end: 17,
+            offsetUnit: 'utf16',
+            textHash: 'hash-staged',
+          },
+          embedding: null,
+          embeddingDimensions: null,
+        })
+        .execute();
+
+      const evidence = await retrieve(ctx, 'keyword', {
+        query: 'staged secret published text',
+      });
+      expect(evidence.map((item) => item.text)).toEqual(['published text']);
+      expect(evidence[0].inputRevision).toBe('1');
+      expect(publishedGenerationId).toBeTruthy();
+    });
+  });
+
+  it('fills the keyword recall budget with authorized candidates after restricted pages', async () => {
+    await setup(async (ctx) => {
+      // 420 short alpha-dense chunks on a page restricted against the actor:
+      // with the pool floor of 50, the old fixed 8-window pre-authorization
+      // scan covered only the first 400 BM25-ordered rows, so an authorized
+      // candidate ranked behind 400+ denied hits was unreachable. The
+      // streaming authorized-budget fill must keep going until exhaustion.
+      const restrictedPage = await createPage(ctx, { member: true });
+      const chunks = Array.from({ length: 420 }, (_, index) => ({
+        text: `alpha alpha filler ${index}`,
+        embedding: null,
+      }));
+      await publishPage(ctx, restrictedPage.pageId, chunks);
+      const pageAccessId = await seedPageRestriction(ctx.db, {
+        id: restrictedPage.pageId,
+        workspaceId: ctx.workspaceId,
+        spaceId: restrictedPage.spaceId,
+      });
+
+      const memberPage = await createPage(ctx, { member: true });
+      // tf=1 in a long document: the lowest BM25 score of the whole matching
+      // corpus, so the member candidate sits behind all 420 restricted rows.
+      await publishPage(ctx, memberPage.pageId, [
+        {
+          text: `alpha ${'padding token '.repeat(60)}`,
+          embedding: null,
+        },
+      ]);
+
+      const evidence = await retrieve(ctx, 'keyword', {
+        query: 'alpha',
+        limit: 1,
+      });
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0].key.pageId).toBe(memberPage.pageId);
+      expect(pageAccessId).toBeTruthy();
+    });
+  });
+
+  it('skips the rerank stage entirely in skipRerank mode', async () => {
+    const rerankPort = new FixtureRerankPort((_query, passages) =>
+      passages.map(() => 0.9),
+    );
+    await setup(
+      async (ctx) => {
+        const { pageId } = await createPage(ctx, { member: true });
+        await publishPage(ctx, pageId, [
+          { text: 'alpha beta gamma', embedding: null },
+          { text: 'alpha delta', embedding: null },
+        ]);
+        await setWorkspaceSettings(ctx, {
+          rag: {
+            retrievalSettings: {
+              rerankModel: 'rerank-model',
+              rerankTopK: 2,
+            },
+          },
+        });
+
+        const result = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'hybrid', limit: 10, skipRerank: true },
+        );
+        expect(rerankPort.calls).toBe(0);
+        expect(result.evidence.map((item) => item.text)).toEqual([
+          'alpha delta',
+          'alpha beta gamma',
+        ]);
+        expect(result.retrieval).toEqual({
+          mode: 'hybrid',
+          rerankStatus: 'not_applicable',
+        });
+      },
+      {},
+      rerankPort,
+    );
+  });
+
+  it('activates rerank through a non-blank rerankModel override', async () => {
+    const rerankPort = new FixtureRerankPort((_query, passages) =>
+      passages.map(() => 0.9),
+    );
+    await setup(
+      async (ctx) => {
+        const { pageId } = await createPage(ctx, { member: true });
+        await publishPage(ctx, pageId, [
+          { text: 'alpha beta gamma', embedding: null },
+          { text: 'alpha delta', embedding: null },
+        ]);
+
+        // No stored rerank model: without the override the fused order stands
+        // and the port is never consulted.
+        const plain = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          { query: 'alpha', mode: 'hybrid', limit: 10 },
+        );
+        expect(rerankPort.calls).toBe(0);
+        expect(plain.retrieval.rerankStatus).toBe('not_configured');
+
+        // A non-blank override selects the model server-side and reranks.
+        const overridden = await ctx.retriever.retrieve(
+          { userId: ctx.actorUserId, workspaceId: ctx.workspaceId },
+          {
+            query: 'alpha',
+            mode: 'hybrid',
+            limit: 10,
+            overrides: { rerankModel: 'override-model' },
+          },
+        );
+        expect(rerankPort.calls).toBe(1);
+        expect(rerankPort.receivedModels).toEqual(['override-model']);
+        expect(overridden.retrieval.rerankStatus).toBe('applied');
+      },
+      {},
+      rerankPort,
     );
   });
 });

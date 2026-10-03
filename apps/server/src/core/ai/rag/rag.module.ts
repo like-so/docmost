@@ -31,10 +31,15 @@ import {
   RAG_GENERATION_STORE,
   RAG_INDEXER,
   RAG_PROFILE_RESOLVER,
+  RAG_RERANK_PORT,
 } from './contracts';
 import { RagIndexerService } from './rag-indexer.service';
 import { RagProcessor } from './rag.processor';
 import { RagOutboxRelayService } from './rag-outbox-relay.service';
+import { RagRetrieverService } from './retrieval/rag-retriever.service';
+import { RagChatRetrievalService } from './retrieval/rag-chat-retrieval.service';
+import { OpenAiCompatibleRerankAdapter } from './retrieval/openai-compatible.rerank.adapter';
+import { RagEvidenceGate } from './retrieval/rag-evidence-gate';
 
 /**
  * Wiring-level profile adapter (docmost-rag-v1 contract 13). The HTTP
@@ -132,6 +137,18 @@ export class RagComposedProfileValidator implements RagProfileConfigValidator {
         sourcePolicy.imageInterpretation !== 'required')
     ) {
       throw new RagError('EMBEDDING_NOT_CONFIGURED', 'sourcePolicy is invalid');
+    }
+    if (
+      config.indexingStrategy !== undefined &&
+      (typeof config.indexingStrategy !== 'object' ||
+        config.indexingStrategy === null ||
+        typeof config.indexingStrategy.vectorEnabled !== 'boolean' ||
+        typeof config.indexingStrategy.keywordEnabled !== 'boolean')
+    ) {
+      throw new RagError(
+        'EMBEDDING_NOT_CONFIGURED',
+        'indexingStrategy must contain boolean vectorEnabled and keywordEnabled',
+      );
     }
 
     const provider = readWorkspaceAiProvider(workspace, this.encryption);
@@ -275,6 +292,11 @@ export class RagComposedProfileResolver implements RagProfileResolver {
     { provide: RAG_INDEXER, useExisting: RagIndexerService },
     RagProcessor,
     RagOutboxRelayService,
+    OpenAiCompatibleRerankAdapter,
+    { provide: RAG_RERANK_PORT, useExisting: OpenAiCompatibleRerankAdapter },
+    RagEvidenceGate,
+    RagRetrieverService,
+    RagChatRetrievalService,
   ],
   exports: [
     RagIndexerService,
@@ -282,6 +304,10 @@ export class RagComposedProfileResolver implements RagProfileResolver {
     RAG_PROFILE_CONFIG_VALIDATOR,
     RAG_PROFILE_RESOLVER,
     RAG_EMBEDDING_PORT,
+    RAG_RERANK_PORT,
+    RagEvidenceGate,
+    RagRetrieverService,
+    RagChatRetrievalService,
   ],
 })
 export class RagModule {}

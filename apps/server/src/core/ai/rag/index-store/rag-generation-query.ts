@@ -72,7 +72,7 @@ function assertQueryEmbedding(values: number[]): void {
   }
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
+export function cosineSimilarity(a: number[], b: number[]): number {
   let dot = 0;
   let normA = 0;
   let normB = 0;
@@ -218,7 +218,7 @@ export class RagGenerationQuery {
 
     return rows.map((row) =>
       this.toEvidence(row as unknown as ActiveChunkRow, {
-        kind: 'lexical',
+        kind: 'keyword',
         value: Number(
           (row as unknown as { lexicalScore: number }).lexicalScore,
         ),

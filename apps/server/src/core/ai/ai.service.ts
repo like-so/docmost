@@ -1,6 +1,7 @@
 import {
   BadGatewayException,
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -12,12 +13,13 @@ import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB } from '@docmost/db/types/kysely.types';
 import { WorkspaceRepo } from '@docmost/db/repos/workspace/workspace.repo';
 import { AttachmentRepo } from '@docmost/db/repos/attachment/attachment.repo';
-import { User, Workspace } from '@docmost/db/types/entity.types';
+import { User, Workspace, Page } from '@docmost/db/types/entity.types';
 import { EncryptionService } from '../../integrations/encryption/encryption.service';
 import { OutboundAgentFactory } from '../../integrations/outbound/outbound-agent.factory';
 import { EnvironmentService } from '../../integrations/environment/environment.service';
 import { SearchService } from '../search/search.service';
-import { UpdateAiProviderDto } from './dto/ai.dto';
+import { SearchResponseDto } from '../search/dto/search-response.dto';
+import { RagRetrievalOverridesDto, UpdateAiProviderDto } from './dto/ai.dto';
 import { AiIndexService } from './ai-index.service';
 import { AttachmentService } from '../attachment/services/attachment.service';
 import { AttachmentType } from '../attachment/attachment.constants';
@@ -28,14 +30,56 @@ import {
   AUDIT_SERVICE,
   IAuditService,
 } from '../../integrations/audit/audit.service';
+import { RagRetrieverService } from './rag/retrieval/rag-retriever.service';
+import { RagChatRetrievalService } from './rag/retrieval/rag-chat-retrieval.service';
+import { RagEvidenceGate } from './rag/retrieval/rag-evidence-gate';
+import { RagError, RagEvidence, RagRetrievalMeta } from './rag/contracts';
+import { mergeRetrievalOverride } from './rag/retrieval/retrieval-config';
+import { JsonValue } from '@docmost/db/types/db';
 
 type AiProvider = {
   driver: string;
   baseUrl: string;
   chatModel: string;
   embeddingModel?: string;
+  rerankModel?: string;
   apiKey?: string;
 };
+
+/**
+ * Shared provider endpoint helpers. `model` overrides the provider's default
+ * chat model in driver-specific URL positions (gemini), so auxiliary model
+ * calls (e.g. the RAG chat rewrite) can target a configured alternate model.
+ */
+export function chatUrlFor(
+  provider: { driver: string; baseUrl: string; chatModel: string },
+  model?: string,
+) {
+  const chatModel = model ?? provider.chatModel;
+  if (provider.driver === 'ollama')
+    return new URL('/api/chat', provider.baseUrl).toString();
+  if (provider.driver === 'gemini')
+    return new URL(
+      `/v1beta/models/${encodeURIComponent(chatModel)}:generateContent`,
+      provider.baseUrl,
+    ).toString();
+  return new URL('/v1/chat/completions', provider.baseUrl).toString();
+}
+
+export function providerHeadersFor(provider: {
+  driver: string;
+  apiKey?: string;
+}) {
+  return provider.driver === 'gemini'
+    ? {
+        'content-type': 'application/json',
+        'x-goog-api-key': provider.apiKey ?? '',
+      }
+    : {
+        authorization: `Bearer ${provider.apiKey}`,
+        'content-type': 'application/json',
+      };
+}
 
 @Injectable()
 export class AiService {
@@ -53,6 +97,9 @@ export class AiService {
     private readonly pageRepo: PageRepo,
     private readonly pageAccessService: PageAccessService,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
+    private readonly ragRetriever: RagRetrieverService,
+    private readonly ragChatRetrieval: RagChatRetrievalService,
+    private readonly evidenceGate: RagEvidenceGate,
   ) {}
 
   async getProvider(workspace: Workspace) {
@@ -80,6 +127,7 @@ export class AiService {
             baseUrl: provider.baseUrl,
             chatModel: provider.chatModel,
             embeddingModel: provider.embeddingModel,
+            rerankModel: provider.rerankModel,
           },
         },
       },
@@ -125,7 +173,7 @@ export class AiService {
 
   async getChat(user: User, chatId: string) {
     const chat = await this.findChat(user, chatId);
-    const messages = await this.db
+    const rows = await this.db
       .selectFrom('aiChatMessages')
       .select(['id', 'role', 'content', 'metadata', 'createdAt'])
       .where('chatId', '=', chat.id)
@@ -134,7 +182,14 @@ export class AiService {
       .orderBy('createdAt', 'asc')
       .limit(200)
       .execute();
-    return { ...chat, messages };
+    return {
+      ...chat,
+      messages: await Promise.all(
+        rows.map((row) =>
+          row.role === 'assistant' ? this.assistantMessageView(user, row) : row,
+        ),
+      ),
+    };
   }
 
   async deleteChat(user: User, workspace: Workspace, chatId: string) {
@@ -164,6 +219,8 @@ export class AiService {
     content: string,
     attachmentIds: string[] = [],
     requestId?: string,
+    spaceId?: string,
+    retrieval?: RagRetrievalOverridesDto,
   ) {
     this.requireChatWrite(workspace);
     this.requireGenerative(workspace);
@@ -188,18 +245,24 @@ export class AiService {
       .returning(['id', 'role', 'content', 'createdAt'])
       .executeTakeFirstOrThrow();
     const assistant = await this.complete(
+      user,
       workspace,
       chat.id,
       requestId,
       this.workspaceKnowledgeOnly(workspace),
       attachmentContext,
+      spaceId,
+      retrieval,
     );
     await this.db
       .updateTable('aiChats')
       .set({ updatedAt: new Date() })
       .where('id', '=', chat.id)
       .execute();
-    return { message, assistant };
+    return {
+      message,
+      assistant: await this.assistantMessageView(user, assistant),
+    };
   }
 
   async cancel(user: User, chatId: string, requestId: string) {
@@ -215,36 +278,140 @@ export class AiService {
     query: string,
     spaceId?: string,
     titleOnly?: boolean,
-  ) {
+    mode?: 'semantic' | 'keyword' | 'hybrid',
+    overrides?: RagRetrievalOverridesDto,
+  ): Promise<{ items: SearchResponseDto[]; retrieval: RagRetrievalMeta }> {
     this.requireSearch(workspace);
+    // Hybrid RAG is the default item source (docmost-rag-v1 contract 12):
+    // items are built from the actual retrieval results (all modes), not
+    // from the lexical page search. The legacy semantic index serves only
+    // title-only queries and when RAG is unavailable or returns nothing.
+    if (!titleOnly) {
+      try {
+        // The effective recallCount drives the recall stage: the stored
+        // default (or any override) clamps into [1, RECALL_COUNT_MAX] inside
+        // the retriever, never the legacy fixed top-25.
+        const effective = mergeRetrievalOverride(
+          await this.readRagWorkspaceSetting(workspace.id, 'retrievalSettings'),
+          overrides,
+        );
+        const result = await this.ragRetriever.retrieve(
+          { userId: user.id, workspaceId: workspace.id },
+          {
+            query,
+            mode: mode ?? 'hybrid',
+            limit: effective.recallCount,
+            ...(spaceId ? { spaceId } : {}),
+            ...(overrides ? { overrides } : {}),
+          },
+        );
+        const items = await this.hydrateEvidencePages(
+          result.evidence,
+          workspace.id,
+        );
+        if (items.length > 0) {
+          return { items, retrieval: result.retrieval };
+        }
+      } catch (error) {
+        // RagError or an unreachable index means the RAG side is
+        // unavailable for this workspace; the legacy index still serves.
+        // Anything else is a real failure.
+        if (!(error instanceof RagError) && !this.isIndexUnavailable(error))
+          throw error;
+      }
+    }
     const response = await this.searchService.searchPage(
       { query, spaceId, titleOnly, limit: 25, offset: 0 },
       { userId: user.id, workspaceId: workspace.id },
     );
-    try {
-      const order = await this.indexService.rank(
-        query,
-        response.items.map((item) => item.id),
-        workspace.id,
-      );
-      const rank = new Map(order.map((id, index) => [id, index]));
-      response.items.sort(
-        (left, right) =>
-          (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
-          (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER),
-      );
-    } catch (error) {
-      if (!this.isIndexUnavailable(error)) throw error;
+    if (!titleOnly) {
+      try {
+        const order = await this.indexService.rank(
+          query,
+          response.items.map((item) => item.id),
+          workspace.id,
+        );
+        const rank = new Map(order.map((id, index) => [id, index]));
+        response.items.sort(
+          (left, right) =>
+            (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+            (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER),
+        );
+      } catch (error) {
+        if (!this.isIndexUnavailable(error)) throw error;
+      }
     }
-    return response;
+    // The executed legacy stage is semantic ranking; rerank never applies.
+    return {
+      ...response,
+      retrieval: { mode: 'semantic', rerankStatus: 'not_applicable' },
+    };
+  }
+
+  /**
+   * Projects retrieval evidence into page search items, preserving evidence
+   * order. Every evidence pageId was authorized inside the retriever; this
+   * hydrates the current page/space fields and drops pages deleted since.
+   */
+  private async hydrateEvidencePages(
+    evidence: RagEvidence[],
+    _workspaceId: string,
+  ): Promise<SearchResponseDto[]> {
+    const pageIds: string[] = [];
+    for (const item of evidence) {
+      if (!pageIds.includes(item.key.pageId)) {
+        pageIds.push(item.key.pageId);
+      }
+    }
+    if (pageIds.length === 0) return [];
+    const rows = await this.db
+      .selectFrom('pages')
+      .select((eb) => [
+        'pages.id',
+        'pages.slugId',
+        'pages.title',
+        'pages.icon',
+        'pages.parentPageId',
+        'pages.creatorId',
+        'pages.createdAt',
+        'pages.updatedAt',
+        this.pageRepo.withSpace(eb),
+      ])
+      .where('pages.id', 'in', pageIds)
+      .where('pages.deletedAt', 'is', null)
+      .execute();
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const items: SearchResponseDto[] = [];
+    for (const pageId of pageIds) {
+      const page = byId.get(pageId);
+      if (!page) continue;
+      items.push({
+        id: page.id,
+        title: page.title,
+        icon: page.icon,
+        parentPageId: page.parentPageId,
+        creatorId: page.creatorId,
+        rank: 0,
+        highlight: '',
+        matchedText: [],
+        wholeWord: false,
+        createdAt: page.createdAt,
+        updatedAt: page.updatedAt,
+        space: page.space,
+      });
+    }
+    return items;
   }
 
   private async complete(
+    user: User,
     workspace: Workspace,
     chatId: string,
     requestId?: string,
     workspaceOnly = false,
     attachmentContext?: string,
+    spaceId?: string,
+    retrieval?: RagRetrievalOverridesDto,
   ) {
     const provider = this.readProvider(workspace);
     if (!provider?.apiKey)
@@ -257,6 +424,21 @@ export class AiService {
       .orderBy('createdAt', 'asc')
       .limit(40)
       .execute();
+    let rag = await this.retrieveRagContext(
+      workspace,
+      user.id,
+      messages,
+      Boolean(attachmentContext),
+      spaceId,
+      retrieval,
+    );
+    if (rag) {
+      // The rerank stage is asynchronous: current page/space authorization,
+      // deletion and publication freshness are rechecked here, after the
+      // rerank and BEFORE any subsequent model stage or persisted output.
+      rag = await this.revalidateRagEvidence(user, workspace, rag);
+    }
+    const ragContext = rag?.context ?? null;
     const url = this.chatUrl(provider);
     const key = requestId
       ? this.requestKey(workspace.id, chatId, requestId)
@@ -277,6 +459,7 @@ export class AiService {
               messages,
               workspaceOnly,
               attachmentContext,
+              ragContext,
             ),
           ),
         });
@@ -300,6 +483,39 @@ export class AiService {
           throw new BadGatewayException(
             'AI provider returned an empty response',
           );
+        // Citation hydration is asynchronous and can itself observe a
+        // mid-flight revocation, so it runs BEFORE the final guard: a
+        // dropped required citation must be visible to the last check.
+        const assistantMetadata: JsonValue = rag
+          ? ({
+              retrieval: rag.retrieval,
+              sources: await this.hydrateCitationSources(user, rag.evidence),
+            } as unknown as JsonValue)
+          : null;
+        if (rag && rag.evidence.length > 0) {
+          // Post-generation guard: evidence supplied to the model can become
+          // unauthorized while the model call or citation hydration is in
+          // flight. If ANY supplied chunk no longer passes the gate, or any
+          // hydrated citation was lost, the answer may embed material the
+          // user can no longer see, so the generated content is discarded
+          // whole — never persisted, emitted or trimmed into citations.
+          const revalidated = await this.revalidateRagEvidence(
+            user,
+            workspace,
+            rag,
+          );
+          const sources = (
+            assistantMetadata as unknown as { sources: unknown[] } | null
+          )?.sources;
+          if (
+            revalidated.evidence.length !== rag.evidence.length ||
+            sources?.length !== rag.evidence.length
+          ) {
+            throw new ConflictException(
+              'Workspace evidence changed during generation; the answer was discarded',
+            );
+          }
+        }
         return this.db
           .insertInto('aiChatMessages')
           .values({
@@ -308,8 +524,9 @@ export class AiService {
             userId: null,
             role: 'assistant',
             content,
+            metadata: assistantMetadata,
           })
-          .returning(['id', 'role', 'content', 'createdAt'])
+          .returning(['id', 'role', 'content', 'metadata', 'createdAt'])
           .executeTakeFirstOrThrow();
       } finally {
         await lease.release();
@@ -404,19 +621,19 @@ export class AiService {
       baseUrl: url.toString(),
       chatModel: input.chatModel.trim(),
       embeddingModel: input.embeddingModel?.trim(),
+      // An explicit null (or blank) clears the stored default rerank model;
+      // omission keeps the existing reference. The server resolves whatever
+      // reference survives against its own provider configuration.
+      rerankModel:
+        input.rerankModel === undefined
+          ? undefined
+          : input.rerankModel?.trim() || undefined,
       apiKey: input.apiKey?.trim(),
     };
   }
 
   private chatUrl(provider: AiProvider) {
-    if (provider.driver === 'ollama')
-      return new URL('/api/chat', provider.baseUrl).toString();
-    if (provider.driver === 'gemini')
-      return new URL(
-        `/v1beta/models/${encodeURIComponent(provider.chatModel)}:generateContent`,
-        provider.baseUrl,
-      ).toString();
-    return new URL('/v1/chat/completions', provider.baseUrl).toString();
+    return chatUrlFor(provider);
   }
 
   private chatRequest(
@@ -424,14 +641,20 @@ export class AiService {
     messages: Array<{ role: string; content: string | null }>,
     workspaceOnly: boolean,
     attachmentContext?: string,
+    ragContext?: string,
   ) {
     const policy = workspaceOnly
       ? 'Answer only from the supplied workspace context. Do not use external knowledge.'
       : undefined;
-    const context = attachmentContext
-      ? `Authorized attachment context:\n${attachmentContext}`
-      : undefined;
-    const instructions = [policy, context].filter(Boolean).join('\n\n');
+    const instructions = [
+      policy,
+      attachmentContext
+        ? `Authorized attachment context:\n${attachmentContext}`
+        : undefined,
+      ragContext ? `Authorized workspace context:\n${ragContext}` : undefined,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
     if (provider.driver === 'ollama')
       return {
         model: provider.chatModel,
@@ -467,7 +690,241 @@ export class AiService {
       baseUrl: provider.baseUrl,
       chatModel: provider.chatModel,
       embeddingModel: provider.embeddingModel,
+      rerankModel: provider.rerankModel,
     };
+  }
+
+  /**
+   * Hybrid RAG retrieval for chat (docmost-rag-v1 contract 12): rewrite,
+   * recall/fusion, expansion and the single final rerank happen inside
+   * RagChatRetrievalService; every returned chunk was rechecked for
+   * authorization at the retrieval boundary. Any failure yields null so chat
+   * works unchanged without RAG. Retrieval metadata is preserved even when
+   * the evidence list is empty (rerankStatus not_applicable), so clients see
+   * the executed flow independently of result presence.
+   */
+  private async retrieveRagContext(
+    workspace: Workspace,
+    userId: string,
+    messages: Array<{ role: string; content: string | null }>,
+    hasAttachments: boolean,
+    spaceId?: string,
+    overrides?: RagRetrievalOverridesDto,
+  ): Promise<{
+    context: string | null;
+    evidence: RagEvidence[];
+    retrieval: RagRetrievalMeta;
+  } | null> {
+    const lastUser = [...messages]
+      .reverse()
+      .find((message) => message.role === 'user' && message.content?.trim());
+    if (!lastUser?.content) return null;
+    try {
+      const output = await this.ragChatRetrieval.retrieveForChat(
+        { userId, workspaceId: workspace.id },
+        {
+          query: lastUser.content.trim(),
+          history: messages
+            .slice(0, messages.indexOf(lastUser))
+            .map((message) => ({
+              role: message.role as 'user' | 'assistant',
+              content: message.content,
+            })),
+          attachmentFileNames: hasAttachments ? ['(attached documents)'] : [],
+          ...(spaceId ? { spaceId } : {}),
+          ...(overrides ? { overrides } : {}),
+        },
+      );
+      return {
+        context: buildRagContext(output.evidence),
+        evidence: output.evidence,
+        retrieval: output.retrieval,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Post-rerank, pre-model revalidation of the chat evidence, delegated to
+   * the shared chunk-level gate: every chunk must still come from a live,
+   * currently published source whose published generation still matches the
+   * evidence's own generationId, revision and the workspace's enabled
+   * profile, and the requesting user must still hold current view access.
+   * Failing chunks are dropped; the context is rebuilt from the survivors so
+   * the model stage and the persisted citations never see stale or
+   * unauthorized material.
+   */
+  private async revalidateRagEvidence(
+    user: User,
+    workspace: Workspace,
+    rag: {
+      context: string | null;
+      evidence: RagEvidence[];
+      retrieval: RagRetrievalMeta;
+    },
+  ): Promise<{
+    context: string | null;
+    evidence: RagEvidence[];
+    retrieval: RagRetrievalMeta;
+  }> {
+    if (rag.evidence.length === 0) {
+      return { ...rag, context: null };
+    }
+    const evidence = await this.evidenceGate.validate(
+      { userId: user.id, workspaceId: workspace.id },
+      rag.evidence,
+    );
+    return {
+      evidence,
+      context: buildRagContext(evidence),
+      retrieval: rag.retrieval,
+    };
+  }
+
+  /**
+   * Persisted citation sources for the assistant message: one entry per
+   * evidence chunk, hydrated with the page title and canonical page URL.
+   * Authorization is rechecked HERE at emission time, against the requesting
+   * user: pages deleted since, or the user lost access to, are dropped
+   * instead of persisted as citations.
+   */
+  private async hydrateCitationSources(
+    user: User,
+    evidence: RagEvidence[],
+  ): Promise<
+    Array<{
+      citationId: string;
+      pageId: string;
+      title: string | null;
+      url: string;
+      locator: RagEvidence['locator'];
+    }>
+  > {
+    const pageIds = [...new Set(evidence.map((item) => item.key.pageId))];
+    if (pageIds.length === 0) return [];
+    const rows = await this.db
+      .selectFrom('pages')
+      .select((eb) => [
+        'pages.id',
+        'pages.slugId',
+        'pages.title',
+        'pages.spaceId',
+        this.pageRepo.withSpace(eb),
+      ])
+      .where('pages.id', 'in', pageIds)
+      .where('pages.deletedAt', 'is', null)
+      .execute();
+    const authorized = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) {
+      try {
+        await this.pageAccessService.validateCanView(
+          { id: row.id, spaceId: row.spaceId } as Page,
+          user,
+        );
+        authorized.set(row.id, row);
+      } catch {
+        // Unauthorized pages produce no citation source.
+      }
+    }
+    return evidence.flatMap((item, index) => {
+      const page = authorized.get(item.key.pageId);
+      if (!page) return [];
+      return [
+        {
+          citationId: String(index + 1),
+          pageId: page.id,
+          title: page.title,
+          url: `/s/${page.space.slug}/p/${page.slugId}`,
+          locator: item.locator,
+        },
+      ];
+    });
+  }
+
+  /**
+   * The assistant message view: the retrieval metadata and citation sources
+   * stored in the message metadata are projected to top-level fields. Stored
+   * sources are RE-AUTHORIZED against the requesting user at reload time: a
+   * page deleted or restricted since the message was written is dropped from
+   * the view, while the retrieval metadata stays intact.
+   */
+  private async assistantMessageView(
+    user: User,
+    row: {
+      id: string;
+      role: string;
+      content: string | null;
+      metadata: unknown;
+      createdAt: Date;
+    },
+  ) {
+    const meta = (row.metadata ?? null) as {
+      retrieval?: RagRetrievalMeta;
+      sources?: Array<{
+        citationId: string;
+        pageId: string;
+        title: string | null;
+        url: string;
+        locator: unknown;
+      }>;
+    } | null;
+    const sources = meta?.sources?.length
+      ? await this.filterStoredSources(user, meta.sources)
+      : undefined;
+    return {
+      id: row.id,
+      role: row.role,
+      content: row.content,
+      createdAt: row.createdAt,
+      ...(meta?.retrieval ? { retrieval: meta.retrieval } : {}),
+      ...(sources ? { sources } : {}),
+    };
+  }
+
+  /** Reload-time recheck of stored citation sources for the requesting user. */
+  private async filterStoredSources<
+    T extends {
+      citationId: string;
+      pageId: string;
+      title: string | null;
+      url: string;
+      locator: unknown;
+    },
+  >(user: User, sources: T[]): Promise<T[]> {
+    const pageIds = [...new Set(sources.map((source) => source.pageId))];
+    const rows = await this.db
+      .selectFrom('pages')
+      .select(['pages.id', 'pages.spaceId'])
+      .where('pages.id', 'in', pageIds)
+      .where('pages.deletedAt', 'is', null)
+      .execute();
+    const viewable = new Set<string>();
+    for (const page of rows) {
+      try {
+        await this.pageAccessService.validateCanView(page as Page, user);
+        viewable.add(page.id);
+      } catch {
+        // Authorization failure drops the stored citation.
+      }
+    }
+    return sources.filter((source) => viewable.has(source.pageId));
+  }
+
+  /** Reads one entry from the owner-controlled `rag` workspace settings. */
+  private async readRagWorkspaceSetting(
+    workspaceId: string,
+    key: 'retrievalSettings',
+  ): Promise<unknown> {
+    const row = await this.db
+      .selectFrom('workspaces')
+      .select('settings')
+      .where('id', '=', workspaceId)
+      .executeTakeFirst();
+    const rag = (row?.settings as Record<string, unknown> | null)?.['rag'] as
+      | Record<string, unknown>
+      | undefined;
+    return rag?.[key];
   }
 
   private attachmentContext(
@@ -528,15 +985,7 @@ export class AiService {
   }
 
   private providerHeaders(provider: AiProvider) {
-    return provider.driver === 'gemini'
-      ? {
-          'content-type': 'application/json',
-          'x-goog-api-key': provider.apiKey ?? '',
-        }
-      : {
-          authorization: `Bearer ${provider.apiKey}`,
-          'content-type': 'application/json',
-        };
+    return providerHeadersFor(provider);
   }
 
   private requestSignal(controller?: AbortController) {
@@ -573,4 +1022,17 @@ export class AiService {
     )
       throw new ForbiddenException('AI search is disabled');
   }
+}
+
+/** Renders authorized evidence into the numbered workspace context block. */
+function buildRagContext(evidence: RagEvidence[]): string | null {
+  if (evidence.length === 0) return null;
+  return evidence
+    .map((item, index) => {
+      const heading = item.locator?.headingPath?.length
+        ? `, ${item.locator.headingPath.join(' > ')}`
+        : '';
+      return `[${index + 1}] (page ${item.key.pageId}${heading})\n${item.text}`;
+    })
+    .join('\n\n');
 }

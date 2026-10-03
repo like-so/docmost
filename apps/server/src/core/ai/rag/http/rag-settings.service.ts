@@ -3,13 +3,18 @@ import { BadRequestException } from '@nestjs/common';
 import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB, KyselyTransaction } from '@docmost/db/types/kysely.types';
 import { Workspace } from '@docmost/db/types/entity.types';
-import { JsonObject } from '@docmost/db/types/db';
+import { JsonObject, JsonValue } from '@docmost/db/types/db';
 import {
   IndexProfile,
   IndexProfileConfig,
   RagError,
+  RagRetrievalSettingsView,
   RagSettingsView,
 } from '../contracts';
+import {
+  parseChatRetrievalSettings,
+  parseRetrievalSettings,
+} from '../retrieval/retrieval-config';
 import { RagStateRepository } from '../persistence/rag-state.repository';
 import {
   RagProfileConfigValidator,
@@ -18,6 +23,8 @@ import {
 
 /** Owner-controlled settings key holding the RAG index profile config. */
 const RAG_SETTINGS_KEY = 'rag';
+const RAG_RETRIEVAL_SETTINGS_KEY = 'retrievalSettings';
+const RAG_CHAT_RETRIEVAL_SETTINGS_KEY = 'chatRetrievalSettings';
 
 /** Converts the profile config to the workspace settings JSON boundary. */
 function toStoredIndexProfileConfig(config: IndexProfileConfig): JsonObject {
@@ -38,6 +45,16 @@ function toStoredIndexProfileConfig(config: IndexProfileConfig): JsonObject {
       tokenizerId: config.embedding.tokenizerId,
       maxInputTokens: config.embedding.maxInputTokens,
     },
+    // indexingStrategy must round-trip: dropping it here made keyword-only
+    // profiles read back as vector-enabled and re-enable the vector channel.
+    ...(config.indexingStrategy
+      ? {
+          indexingStrategy: {
+            vectorEnabled: config.indexingStrategy.vectorEnabled,
+            keywordEnabled: config.indexingStrategy.keywordEnabled,
+          },
+        }
+      : {}),
   };
 }
 
@@ -81,7 +98,10 @@ export class RagSettingsService {
 
   async updateSettings(
     workspace: Workspace,
-    input: { enabled: boolean; indexProfileConfig: IndexProfileConfig },
+    input: {
+      enabled: boolean;
+      indexProfileConfig: IndexProfileConfig;
+    },
   ): Promise<RagSettingsView> {
     let profile: IndexProfile;
     try {
@@ -166,5 +186,87 @@ export class RagSettingsService {
       .set({ settings: merged })
       .where('id', '=', workspaceId)
       .execute();
+  }
+
+  /**
+   * Owner-only retrieval settings view: current values normalized through the
+   * same clamping used at retrieval time, plus the pinned default prompt.
+   */
+  async getRetrievalSettings(
+    workspace: Workspace,
+  ): Promise<RagRetrievalSettingsView> {
+    const stored = this.readRetrievalSettings(workspace);
+    const search = parseRetrievalSettings(stored.retrievalSettings);
+    const chat = parseChatRetrievalSettings(stored.chatRetrievalSettings);
+    return { search, chat };
+  }
+
+  /**
+   * Partial owner-only retrieval settings update. Every field is optional;
+   * the merged payload is normalized (defaults and clamping) before it is
+   * persisted, and the normalized values are returned.
+   */
+  async updateRetrievalSettings(
+    workspace: Workspace,
+    input: {
+      search?: Record<string, unknown> | null;
+      chat?: Record<string, unknown> | null;
+    },
+  ): Promise<RagRetrievalSettingsView> {
+    const workspaceId = workspace.id;
+    return this.db.transaction().execute(async (trx) => {
+      await trx
+        .selectFrom('workspaces')
+        .select('id')
+        .where('id', '=', workspaceId)
+        .forUpdate()
+        .executeTakeFirst();
+      const row = await trx
+        .selectFrom('workspaces')
+        .select('settings')
+        .where('id', '=', workspaceId)
+        .executeTakeFirst();
+      const settings = (row?.settings ?? {}) as JsonObject;
+      const existingRagConfig = (settings[RAG_SETTINGS_KEY] ??
+        {}) as JsonObject;
+      const current = this.readRetrievalSettings({
+        settings: settings as Workspace['settings'],
+      } as Workspace);
+      const nextRetrieval = parseRetrievalSettings({
+        ...(current.retrievalSettings as Record<string, unknown> | null),
+        ...(input.search ?? {}),
+      });
+      const nextChat = parseChatRetrievalSettings({
+        ...(current.chatRetrievalSettings as Record<string, unknown> | null),
+        ...(input.chat ?? {}),
+      });
+      const merged: JsonObject = {
+        ...settings,
+        [RAG_SETTINGS_KEY]: {
+          ...existingRagConfig,
+          [RAG_RETRIEVAL_SETTINGS_KEY]: nextRetrieval as unknown as JsonValue,
+          [RAG_CHAT_RETRIEVAL_SETTINGS_KEY]: nextChat as unknown as JsonValue,
+        },
+      };
+      await trx
+        .updateTable('workspaces')
+        .set({ settings: merged })
+        .where('id', '=', workspaceId)
+        .execute();
+      return { search: nextRetrieval, chat: nextChat };
+    });
+  }
+
+  private readRetrievalSettings(workspace: Workspace): {
+    retrievalSettings: unknown;
+    chatRetrievalSettings: unknown;
+  } {
+    const rag = (workspace.settings as Record<string, unknown> | null)?.[
+      RAG_SETTINGS_KEY
+    ] as Record<string, unknown> | undefined;
+    return {
+      retrievalSettings: rag?.[RAG_RETRIEVAL_SETTINGS_KEY],
+      chatRetrievalSettings: rag?.[RAG_CHAT_RETRIEVAL_SETTINGS_KEY],
+    };
   }
 }

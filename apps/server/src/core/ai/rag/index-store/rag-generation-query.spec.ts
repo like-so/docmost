@@ -380,7 +380,7 @@ import { RagGenerationQuery } from './rag-generation-query';
       const evidence = await keyword(ctx, 'gravity waves');
       expect(evidence).toHaveLength(1);
       expect(evidence[0].text).toBe('gravity waves detection apparatus');
-      expect(evidence[0].score.kind).toBe('lexical');
+      expect(evidence[0].score.kind).toBe('keyword');
       expect(evidence[0].score.value).toBeGreaterThan(0);
 
       expect(await keyword(ctx, 'nonexistenttoken')).toEqual([]);

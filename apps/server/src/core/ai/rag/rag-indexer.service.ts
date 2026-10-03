@@ -8,6 +8,7 @@ import {
   EmbeddingPort,
   GenerationStore,
   IndexProfile,
+  IndexProfileConfig,
   RagProfileResolver,
   IndexRequest,
   InputRevision,
@@ -24,6 +25,7 @@ import {
   SourceReader,
 } from './contracts';
 import { RagStateRepository } from './persistence/rag-state.repository';
+import { effectiveIndexingStrategy } from './retrieval/retrieval-config';
 
 /**
  * Cooperative cancellation between the ordered steps. Throwing a plain error
@@ -240,17 +242,31 @@ export class RagIndexerService implements RagIndexer {
     const batch = await this.chunker.split(document, profile);
 
     this.throwIfAborted(options?.signal, 'before-embed');
-    const embeddingBatch = await this.embedding.embed(
-      request.key.workspaceId,
-      profile,
-      batch.chunks.map((chunk) => ({
-        chunkId: chunk.chunkId,
-        text: chunk.text,
-      })),
-    );
+    // The indexing strategy can disable vector embeddings for this profile;
+    // keyword-only indexes publish generations whose chunks have no stored
+    // vectors, which semantic retrieval drops and keyword retrieval ignores.
+    const vectorless =
+      (await this.readIndexingStrategy(request.key.workspaceId))
+        ?.vectorEnabled === false;
+    const embeddingBatch = vectorless
+      ? {
+          profileHash: profile.profileHash,
+          dimensions: profile.embedding.dimensions,
+          vectors: [],
+        }
+      : await this.embedding.embed(
+          request.key.workspaceId,
+          profile,
+          batch.chunks.map((chunk) => ({
+            chunkId: chunk.chunkId,
+            text: chunk.text,
+          })),
+        );
 
     this.throwIfAborted(options?.signal, 'before-stage');
-    const staged = await this.generationStore.stage(batch, embeddingBatch);
+    const staged = await this.generationStore.stage(batch, embeddingBatch, {
+      vectorless: vectorless,
+    });
 
     const outcome = await this.generationStore.publishIfCurrent(
       request.key,
@@ -270,6 +286,23 @@ export class RagIndexerService implements RagIndexer {
       };
     }
     return this.terminal(request, outcome);
+  }
+
+  /** Effective indexing strategy from the owner-controlled stored config. */
+  private async readIndexingStrategy(
+    workspaceId: string,
+  ): Promise<{ vectorEnabled: boolean; keywordEnabled: boolean } | null> {
+    const row = await this.db
+      .selectFrom('workspaces')
+      .select('settings')
+      .where('id', '=', workspaceId)
+      .executeTakeFirst();
+    const stored = (row?.settings as Record<string, unknown> | null)?.[
+      'rag'
+    ] as
+      | { indexProfileConfig?: Pick<IndexProfileConfig, 'indexingStrategy'> }
+      | undefined;
+    return effectiveIndexingStrategy(stored?.indexProfileConfig ?? null);
   }
 
   private terminal(

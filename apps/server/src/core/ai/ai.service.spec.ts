@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -10,6 +11,15 @@ const workspace = {
   settings: { ai: { chat: true, generative: true, search: true } },
 } as any;
 const user = { id: 'user', workspaceId: 'ws' } as any;
+
+/** Mocks the workspace `rag` settings probe behind semanticSearch. */
+function mockSettingsProbe(instance: any, stored: unknown = null) {
+  const node: any = {};
+  node.select = () => node;
+  node.where = () => node;
+  node.executeTakeFirst = jest.fn().mockResolvedValue(stored);
+  instance.db.selectFrom.mockReturnValue(node);
+}
 
 function service() {
   const db: any = {
@@ -33,6 +43,18 @@ function service() {
     { findById: jest.fn() } as any,
     { validateCanView: jest.fn() } as any,
     { logWithContext: jest.fn() } as any,
+    {
+      retrieve: jest.fn().mockResolvedValue({ evidence: [] }),
+    } as any,
+    {
+      retrieveForChat: jest.fn().mockResolvedValue({
+        evidence: [],
+        rewrittenQuery: '',
+        rewriteApplied: false,
+        expansionVariants: [],
+      }),
+    } as any,
+    { validate: jest.fn().mockResolvedValue([]) } as any,
   ) as any;
 }
 
@@ -192,19 +214,17 @@ describe('AiService settings and policy', () => {
 
   it('uses only an authorized chat attachment as model context', async () => {
     const instance = service();
-    instance.attachmentRepo.findByIdWithContent = jest
-      .fn()
-      .mockResolvedValue({
-        workspaceId: 'ws',
-        creatorId: 'user',
-        aiChatId: null,
-        type: 'chat',
-        fileExt: '.txt',
-        mimeType: 'text/plain',
-        deletedAt: null,
-        fileName: 'notes.txt',
-        textContent: 'approved content',
-      });
+    instance.attachmentRepo.findByIdWithContent = jest.fn().mockResolvedValue({
+      workspaceId: 'ws',
+      creatorId: 'user',
+      aiChatId: null,
+      type: 'chat',
+      fileExt: '.txt',
+      mimeType: 'text/plain',
+      deletedAt: null,
+      fileName: 'notes.txt',
+      textContent: 'approved content',
+    });
     await expect(
       instance.claimAttachments(['attachment'], 'chat', user),
     ).resolves.toContain('approved content');
@@ -215,19 +235,17 @@ describe('AiService settings and policy', () => {
 
   it('accepts an upload already bound to the same chat', async () => {
     const instance = service();
-    instance.attachmentRepo.findByIdWithContent = jest
-      .fn()
-      .mockResolvedValue({
-        workspaceId: 'ws',
-        creatorId: 'user',
-        aiChatId: 'chat',
-        type: 'chat',
-        fileExt: '.txt',
-        mimeType: 'text/plain',
-        deletedAt: null,
-        fileName: 'notes.txt',
-        textContent: 'uploaded content',
-      });
+    instance.attachmentRepo.findByIdWithContent = jest.fn().mockResolvedValue({
+      workspaceId: 'ws',
+      creatorId: 'user',
+      aiChatId: 'chat',
+      type: 'chat',
+      fileExt: '.txt',
+      mimeType: 'text/plain',
+      deletedAt: null,
+      fileName: 'notes.txt',
+      textContent: 'uploaded content',
+    });
 
     await expect(
       instance.claimAttachments(['attachment'], 'chat', user),
@@ -236,18 +254,16 @@ describe('AiService settings and policy', () => {
 
   it('checks current page access before using a page attachment', async () => {
     const instance = service();
-    instance.attachmentRepo.findByIdWithContent = jest
-      .fn()
-      .mockResolvedValue({
-        workspaceId: 'ws',
-        type: 'file',
-        pageId: 'page',
-        fileName: 'notes.txt',
-        textContent: 'approved content',
-        fileExt: '.txt',
-        mimeType: 'text/plain',
-        deletedAt: null,
-      });
+    instance.attachmentRepo.findByIdWithContent = jest.fn().mockResolvedValue({
+      workspaceId: 'ws',
+      type: 'file',
+      pageId: 'page',
+      fileName: 'notes.txt',
+      textContent: 'approved content',
+      fileExt: '.txt',
+      mimeType: 'text/plain',
+      deletedAt: null,
+    });
     instance.pageRepo.findById.mockResolvedValue({ id: 'page' });
 
     await instance.claimAttachments(['attachment'], 'chat', user);
@@ -273,13 +289,14 @@ describe('AiService settings and policy', () => {
 
     await instance.deleteChat(user, workspace, 'chat');
 
-    expect(instance.attachmentService.handleDeleteAiChatAttachments).toHaveBeenCalledWith(
-      'chat',
-    );
+    expect(
+      instance.attachmentService.handleDeleteAiChatAttachments,
+    ).toHaveBeenCalledWith('chat');
   });
 
   it('uses permission-filtered search only when enabled', async () => {
     const instance = service();
+    mockSettingsProbe(instance);
     await instance.semanticSearch(user, workspace, 'roadmap');
     expect(instance['searchService'].searchPage).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'roadmap' }),
@@ -294,18 +311,78 @@ describe('AiService settings and policy', () => {
     ).rejects.toThrow(ForbiddenException);
   });
 
+  it('builds search items from hybrid retrieval results with retrieval meta', async () => {
+    const instance = service();
+    const createdAt = new Date('2026-01-01T00:00:00Z');
+    const space = { id: 's1', name: 'Space', slug: 'space' };
+    instance['ragRetriever'].retrieve.mockResolvedValue({
+      evidence: [
+        {
+          key: { pageId: 'p2' },
+          text: 'second',
+          score: { kind: 'rrf', value: 0.9 },
+          locator: null,
+        },
+        {
+          key: { pageId: 'p1' },
+          text: 'first',
+          score: { kind: 'rrf', value: 0.8 },
+          locator: null,
+        },
+      ],
+      retrieval: { mode: 'hybrid', rerankStatus: 'not_configured' },
+    });
+    const page = (id: string, title: string) => ({
+      id,
+      title,
+      icon: null,
+      parentPageId: null,
+      creatorId: 'u',
+      createdAt,
+      updatedAt: createdAt,
+      space,
+    });
+    instance.db.selectFrom.mockReturnValue({
+      select: () => {
+        // Shared chain node: the workspace-settings probe resolves first
+        // (executeTakeFirst), then the page hydration executes.
+        const node: any = {};
+        node.where = () => node;
+        node.execute = jest
+          .fn()
+          .mockResolvedValue([page('p1', 'First'), page('p2', 'Second')]);
+        node.executeTakeFirst = jest.fn().mockResolvedValue(null);
+        return node;
+      },
+    });
+
+    const result = await instance.semanticSearch(user, workspace, 'roadmap');
+    // Item order is the evidence order, not the lexical order.
+    expect(result.items.map((item) => item.id)).toEqual(['p2', 'p1']);
+    expect(result.retrieval).toEqual({
+      mode: 'hybrid',
+      rerankStatus: 'not_configured',
+    });
+    expect(instance['searchService'].searchPage).not.toHaveBeenCalled();
+  });
+
   it('falls back only when semantic indexing is explicitly unavailable', async () => {
     const instance = service();
+    mockSettingsProbe(instance);
     instance.indexService.rank.mockRejectedValue(
       Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }),
     );
     await expect(
       instance.semanticSearch(user, workspace, 'roadmap'),
-    ).resolves.toEqual({ items: [] });
+    ).resolves.toEqual({
+      items: [],
+      retrieval: { mode: 'semantic', rerankStatus: 'not_applicable' },
+    });
   });
 
   it('surfaces semantic index corruption instead of silently degrading', async () => {
     const instance = service();
+    mockSettingsProbe(instance);
     instance.indexService.rank.mockRejectedValue(new Error('invalid vector'));
     await expect(
       instance.semanticSearch(user, workspace, 'roadmap'),
@@ -372,7 +449,9 @@ describe('AiService settings and policy', () => {
       select: () => ({
         where: () => ({
           where: () => ({
-            orderBy: () => ({ limit: () => ({ execute: jest.fn().mockResolvedValue([]) }) }),
+            orderBy: () => ({
+              limit: () => ({ execute: jest.fn().mockResolvedValue([]) }),
+            }),
           }),
         }),
       }),
@@ -384,16 +463,361 @@ describe('AiService settings and policy', () => {
     });
     const response = {
       statusCode: 200,
-      body: { json: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }) },
+      body: {
+        json: jest
+          .fn()
+          .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+      },
     } as unknown as Awaited<ReturnType<typeof undici.request>>;
     jest.spyOn(undici, 'request').mockResolvedValue(response);
     instance.db.insertInto.mockReturnValue({
-      values: () => ({ returning: () => ({ executeTakeFirstOrThrow: jest.fn().mockResolvedValue({}) }) }),
+      values: () => ({
+        returning: () => ({
+          executeTakeFirstOrThrow: jest.fn().mockResolvedValue({}),
+        }),
+      }),
     });
 
-    await instance.complete(workspace, 'chat', 'request');
+    await instance.complete(user, workspace, 'chat', 'request');
 
     expect(instance.requests.has('ws:chat:request')).toBe(false);
+    expect(release).toHaveBeenCalled();
+  });
+
+  it('runs chat retrieval once with skipRerank and the full overrides', async () => {
+    const instance = service();
+    instance['ragChatRetrieval'].retrieveForChat.mockResolvedValue({
+      evidence: [],
+      rewrittenQuery: '',
+      rewriteApplied: false,
+      expansionVariants: [],
+      retrieval: { mode: 'hybrid', rerankStatus: 'not_applicable' },
+    });
+
+    const result = await instance['retrieveRagContext'](
+      workspace,
+      'user',
+      [{ role: 'user', content: 'question' }],
+      false,
+      'space-1',
+      { rerankModel: 'override-model' },
+    );
+    // Empty evidence keeps the retrieval metadata (rerankStatus
+    // not_applicable) instead of collapsing to null.
+    expect(result.evidence).toEqual([]);
+    expect(result.context).toBeNull();
+    expect(result.retrieval).toEqual({
+      mode: 'hybrid',
+      rerankStatus: 'not_applicable',
+    });
+    const [actor, input] =
+      instance['ragChatRetrieval'].retrieveForChat.mock.calls[0];
+    expect(actor).toEqual({ userId: 'user', workspaceId: 'ws' });
+    // retrieveForChat itself runs the retriever in skipRerank mode, so chat
+    // reranks exactly once inside RagChatRetrievalService.
+    expect(input).toMatchObject({
+      query: 'question',
+      spaceId: 'space-1',
+      overrides: { rerankModel: 'override-model' },
+    });
+    expect(input).not.toHaveProperty('pageIds');
+    expect(input).not.toHaveProperty('mode');
+  });
+
+  it('re-authorizes stored citation sources at reload time', async () => {
+    const instance = service();
+    const node: any = {};
+    node.select = () => node;
+    node.where = () => node;
+    node.execute = jest.fn().mockResolvedValue([
+      { id: 'p1', spaceId: 's1' },
+      { id: 'p2', spaceId: 's2' },
+    ]);
+    instance.db.selectFrom.mockReturnValue(node);
+    instance['pageAccessService'].validateCanView = jest
+      .fn()
+      .mockImplementation((page: any) =>
+        page.id === 'p1'
+          ? Promise.resolve()
+          : Promise.reject(new Error('forbidden')),
+      );
+    const view = await instance['assistantMessageView'](user, {
+      id: 'm1',
+      role: 'assistant',
+      content: 'answer',
+      metadata: {
+        retrieval: { mode: 'hybrid', rerankStatus: 'applied' },
+        sources: [
+          {
+            citationId: '1',
+            pageId: 'p1',
+            title: 'A',
+            url: '/s/s1/p/a',
+            locator: null,
+          },
+          {
+            citationId: '2',
+            pageId: 'p2',
+            title: 'B',
+            url: '/s/s2/p/b',
+            locator: null,
+          },
+        ],
+      },
+      createdAt: new Date(),
+    });
+    // The retrieval metadata stays intact; the source whose page the user
+    // can no longer view is dropped from the projected view.
+    expect(view.retrieval).toEqual({ mode: 'hybrid', rerankStatus: 'applied' });
+    expect(view.sources.map((source: any) => source.pageId)).toEqual(['p1']);
+  });
+
+  it('drops stale and unauthorized evidence before the model stage', async () => {
+    const instance = service();
+    // revalidateRagEvidence delegates to the shared chunk-level gate; the
+    // gate is stubbed to return only the fresh, authorized survivor.
+    const survivors = [
+      {
+        chunkId: 'c1',
+        key: { workspaceId: 'ws', pageId: 'p1' },
+        inputRevision: '2',
+        text: 'fresh',
+        locator: null,
+        score: { kind: 'rrf', value: 1 },
+      },
+    ];
+    instance['evidenceGate'].validate = jest
+      .fn()
+      .mockResolvedValue(survivors);
+
+    const rag = {
+      context: 'stale context',
+      evidence: [
+        ...survivors,
+        {
+          chunkId: 'c2',
+          key: { workspaceId: 'ws', pageId: 'p2' },
+          inputRevision: '1',
+          text: 'stale',
+          locator: null,
+          score: { kind: 'rrf', value: 0.5 },
+        },
+        {
+          chunkId: 'c3',
+          key: { workspaceId: 'ws', pageId: 'p3' },
+          inputRevision: '2',
+          text: 'restricted',
+          locator: null,
+          score: { kind: 'rrf', value: 0.4 },
+        },
+      ],
+      retrieval: { mode: 'hybrid', rerankStatus: 'applied' },
+    };
+    const result = await instance['revalidateRagEvidence'](
+      user,
+      workspace,
+      rag as any,
+    );
+    // The gate's survivors are the new evidence; the context is rebuilt from
+    // them and the retrieval metadata is preserved untouched.
+    expect(result.evidence.map((item: any) => item.text)).toEqual(['fresh']);
+    expect(result.context).toContain('fresh');
+    expect(result.retrieval).toEqual({
+      mode: 'hybrid',
+      rerankStatus: 'applied',
+    });
+    expect(instance['evidenceGate'].validate).toHaveBeenCalledWith(
+      { userId: 'user', workspaceId: 'ws' },
+      rag.evidence,
+    );
+  });
+
+  it('discards the generated answer when evidence is revoked while the model call is in flight', async () => {
+    const instance = service();
+    instance.readProvider = jest.fn().mockReturnValue({
+      driver: 'openai',
+      baseUrl: 'https://ai.example.test',
+      chatModel: 'chat',
+      apiKey: 'secret',
+    });
+    let p1Authorized = true;
+    const evidenceChunk = {
+      chunkId: 'c1',
+      key: { workspaceId: 'ws', pageId: 'p1' },
+      inputRevision: '2',
+      text: 'fresh',
+      locator: null,
+      score: { kind: 'rrf', value: 1 },
+    };
+    // The shared gate revalidates live state: while p1 is still authorized it
+    // returns the evidence, and after the in-flight revocation it returns
+    // nothing.
+    instance['evidenceGate'].validate = jest
+      .fn()
+      .mockImplementation(async () => (p1Authorized ? [evidenceChunk] : []));
+
+    const messagesNode: any = {};
+    for (const method of ['select', 'where', 'orderBy']) {
+      messagesNode[method] = () => messagesNode;
+    }
+    messagesNode.limit = () => ({
+      execute: jest
+        .fn()
+        .mockResolvedValue([{ role: 'user', content: 'question' }]),
+    });
+    // Hydration now runs before the post-generation guard; the page is still
+    // authorized during hydration, so the citation is kept and the gate is
+    // what drops the evidence after the in-flight revocation.
+    const pagesNode: any = {};
+    for (const method of ['select', 'where']) {
+      pagesNode[method] = () => pagesNode;
+    }
+    pagesNode.execute = jest.fn().mockResolvedValue([
+      {
+        id: 'p1',
+        slugId: 'p1',
+        title: 'P1',
+        spaceId: 's1',
+        space: { slug: 's1' },
+      },
+    ]);
+    instance.db.selectFrom.mockImplementation((table: string) => {
+      if (table === 'aiChatMessages') return messagesNode;
+      if (table === 'pages') return pagesNode;
+      return {};
+    });
+
+    instance['ragChatRetrieval'].retrieveForChat.mockResolvedValue({
+      evidence: [evidenceChunk],
+      rewrittenQuery: '',
+      rewriteApplied: false,
+      expansionVariants: [],
+      retrieval: { mode: 'hybrid', rerankStatus: 'applied' },
+    });
+
+    const release = jest.fn();
+    instance.outboundAgent.lease = jest.fn().mockResolvedValue({
+      dispatcher: {},
+      release,
+    });
+    const response = {
+      statusCode: 200,
+      body: {
+        json: jest
+          .fn()
+          .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+      },
+    } as unknown as Awaited<ReturnType<typeof undici.request>>;
+    // The page loses authorization while the provider call is in flight: the
+    // flip lands between the pre-model revalidation and the post-generation
+    // guard.
+    jest.spyOn(undici, 'request').mockImplementation(async () => {
+      p1Authorized = false;
+      return response;
+    });
+
+    instance.db.insertInto = jest.fn();
+
+    await expect(
+      instance.complete(user, workspace, 'chat', 'request'),
+    ).rejects.toThrow(ConflictException);
+
+    // Fail-safe outcome: the generated content is neither persisted nor
+    // emitted; the guard discards it after the in-flight revocation.
+    expect(instance.db.insertInto).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalled();
+  });
+
+  it('discards the generated answer when evidence is revoked during citation hydration', async () => {
+    const instance = service();
+    instance.readProvider = jest.fn().mockReturnValue({
+      driver: 'openai',
+      baseUrl: 'https://ai.example.test',
+      chatModel: 'chat',
+      apiKey: 'secret',
+    });
+    const evidenceChunk = {
+      chunkId: 'c1',
+      key: { workspaceId: 'ws', pageId: 'p1' },
+      inputRevision: '2',
+      text: 'fresh',
+      locator: null,
+      score: { kind: 'rrf', value: 1 },
+    };
+    // Both gate passes succeed, matching the reviewed probe: the revocation
+    // lands inside asynchronous citation hydration, which used to run after
+    // the post-generation gate.
+    instance['evidenceGate'].validate = jest
+      .fn()
+      .mockResolvedValue([evidenceChunk]);
+
+    const messagesNode: any = {};
+    for (const method of ['select', 'where', 'orderBy']) {
+      messagesNode[method] = () => messagesNode;
+    }
+    messagesNode.limit = () => ({
+      execute: jest
+        .fn()
+        .mockResolvedValue([{ role: 'user', content: 'question' }]),
+    });
+    const pagesNode: any = {};
+    for (const method of ['select', 'where']) {
+      pagesNode[method] = () => pagesNode;
+    }
+    pagesNode.execute = jest.fn().mockResolvedValue([
+      {
+        id: 'p1',
+        slugId: 'p1',
+        title: 'P1',
+        spaceId: 's1',
+        space: { slug: 's1' },
+      },
+    ]);
+    instance.db.selectFrom.mockImplementation((table: string) => {
+      if (table === 'aiChatMessages') return messagesNode;
+      if (table === 'pages') return pagesNode;
+      return {};
+    });
+
+    instance['ragChatRetrieval'].retrieveForChat.mockResolvedValue({
+      evidence: [evidenceChunk],
+      rewrittenQuery: '',
+      rewriteApplied: false,
+      expansionVariants: [],
+      retrieval: { mode: 'hybrid', rerankStatus: 'applied' },
+    });
+
+    const release = jest.fn();
+    instance.outboundAgent.lease = jest.fn().mockResolvedValue({
+      dispatcher: {},
+      release,
+    });
+    const response = {
+      statusCode: 200,
+      body: {
+        json: jest
+          .fn()
+          .mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+      },
+    } as unknown as Awaited<ReturnType<typeof undici.request>>;
+    jest.spyOn(undici, 'request').mockResolvedValue(response);
+
+    // The page loses access exactly while citation hydration rechecks it:
+    // hydration drops the citation, and the final pre-insert guard must see
+    // that loss instead of persisting an answer with sources:[].
+    instance['pageAccessService'].validateCanView = jest
+      .fn()
+      .mockRejectedValue(new Error('revoked during hydration'));
+
+    instance.db.insertInto = jest.fn();
+
+    await expect(
+      instance.complete(user, workspace, 'chat', 'request'),
+    ).rejects.toThrow(ConflictException);
+
+    // Fail-safe outcome: the whole answer is discarded even though both
+    // evidence-gate passes succeeded.
+    expect(instance.db.insertInto).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalled();
   });
 });

@@ -455,6 +455,49 @@ import { RagGenerationQuery } from './rag-generation-query';
     });
   });
 
+  it('stages and publishes a keyword-only vectorless generation', async () => {
+    await setup(async (ctx) => {
+      await advance(ctx, 'upsert');
+      const { batch, embeddingBatch } = makeBatch(ctx, {
+        revision: '1',
+        profileHash: 'profile-a',
+        texts: ['alpha text', 'beta text'],
+      });
+
+      // The vectorless contract forbids a non-empty embedding batch, so the
+      // strict default can never be bypassed by relabeling.
+      await expect(
+        ctx.store.stage(batch, embeddingBatch, { vectorless: true }),
+      ).rejects.toThrow('vectorless');
+
+      const { generationId } = await ctx.store.stage(
+        batch,
+        { profileHash: batch.profileHash, dimensions: DIMENSIONS, vectors: [] },
+        { vectorless: true },
+      );
+      await enableProfile(ctx, 'profile-a');
+      const outcome = await ctx.store.publishIfCurrent(
+        ctx.key,
+        toInputRevision('1'),
+        'profile-a',
+        generationId,
+      );
+      expect(outcome).toBe('published');
+
+      const chunkRows = await ctx.db
+        .selectFrom('ragChunks')
+        .selectAll()
+        .where('generationId', '=', generationId)
+        .execute();
+      expect(chunkRows).toHaveLength(2);
+      expect(chunkRows.every((row) => row.embedding === null)).toBe(true);
+
+      const state = await stateOf(ctx);
+      expect(state?.publishedGenerationId).toBe(generationId);
+      expect(state?.publishedInputRevision).toBe('1');
+    });
+  });
+
   it('publishes atomically, retires older generations, and keeps newer staged work', async () => {
     await setup(async (ctx) => {
       await advance(ctx, 'upsert');
